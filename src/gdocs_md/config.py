@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -111,6 +112,18 @@ def resolve_config(cli_args=None) -> Config:
 
     config_file_path = find_config_file(cli("config_file"))
     file_data = load_config_file(config_file_path)
+
+    unknown_keys = set(file_data) - set(_CONFIG_KEYS)
+    if unknown_keys:
+        # A typo'd key (credential_dir instead of credentials_dir) would
+        # otherwise silently fall back to the default with no signal at
+        # all -- W18.
+        print(
+            f"[Warning] {config_file_path}: unrecognized config key(s): "
+            f"{', '.join(sorted(unknown_keys))} (ignored; known keys: "
+            f"{', '.join(sorted(_CONFIG_KEYS))})",
+            file=sys.stderr,
+        )
 
     def resolved(key, default):
         cli_value = cli(key)

@@ -4,6 +4,7 @@ helpers shared across commands."""
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -11,7 +12,15 @@ from pathlib import Path
 
 from .auth import load_credentials
 from .config import Config
-from .errors import AuthOrConfigError, ApiError, MissingPandocError
+from .errors import ApiError, MissingPandocError, NotFoundOrPermissionError
+
+# `--markdown-headings=atx` (used below) requires pandoc >= 2.11.2; on an
+# older pandoc (e.g. Ubuntu 22.04's apt package, 2.9.x) it's an unrecognized
+# option and the conversion fails outright. check_pandoc() checks the
+# installed version against this floor up front, so the failure is exit 7
+# ("pandoc missing or too old", naming the minimum) instead of a generic
+# exit 8 pandoc-argument error with no indication of why.
+_MIN_PANDOC_VERSION = (2, 11, 2)
 
 
 def get_docs_service(config: Config, account: str):
@@ -45,9 +54,14 @@ def get_sheets_service(config: Config, account: str):
 
 
 def check_pandoc():
+    """Verify pandoc is installed AND new enough (>= 2.11.2 -- see
+    `_MIN_PANDOC_VERSION`). Raises MissingPandocError (exit 7) either way,
+    naming the minimum version when the installed one is too old rather
+    than letting an old pandoc fail later with an "Unknown option" error
+    that gives no indication of why."""
     try:
-        subprocess.run(["pandoc", "--version"], capture_output=True, check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        proc = subprocess.run(["pandoc", "--version"], capture_output=True, check=True, text=True)
+    except FileNotFoundError as e:
         if shutil.which("brew"):
             raise MissingPandocError(
                 "pandoc is not installed. Install it with: brew install pandoc"
@@ -55,6 +69,23 @@ def check_pandoc():
         raise MissingPandocError(
             "pandoc is not installed. See: https://pandoc.org/installing.html"
         ) from e
+    except (subprocess.CalledProcessError, PermissionError) as e:
+        raise MissingPandocError(f"pandoc is installed but could not be run: {e}") from e
+
+    match = re.search(r"pandoc(?:\.exe)?\s+(\d+)\.(\d+)(?:\.(\d+))?", proc.stdout)
+    if match:
+        version = tuple(int(g) if g else 0 for g in match.groups())
+        if version < _MIN_PANDOC_VERSION:
+            min_str = ".".join(str(n) for n in _MIN_PANDOC_VERSION)
+            found_str = ".".join(str(n) for n in version)
+            raise MissingPandocError(
+                f"pandoc {found_str} is installed, but gdocs-md requires pandoc "
+                f">= {min_str} (uses --markdown-headings=atx). "
+                "See: https://pandoc.org/installing.html"
+            )
+    # If the version string can't be parsed, proceed rather than block on a
+    # format this check doesn't recognize -- the loud failure here is
+    # "pandoc too old", not "pandoc's --version output changed shape".
 
 
 def convert_markdown_to_docx(markdown_file: Path) -> str:
@@ -66,6 +97,11 @@ def convert_markdown_to_docx(markdown_file: Path) -> str:
     against the file it's written in rather than the caller's current
     directory. Without this, a relative image path silently produces a doc
     with no image, pandoc still exits 0, and nothing downstream notices.
+
+    Passes `--` before the filename: running from the file's own directory
+    means the filename is now just its bare name (no leading `/`), and a
+    markdown file whose name starts with `-` (e.g. `-notes.md`) would
+    otherwise be parsed as a pandoc option instead of a filename.
     """
     check_pandoc()
 
@@ -80,9 +116,10 @@ def convert_markdown_to_docx(markdown_file: Path) -> str:
                 "-f",
                 "markdown-auto_identifiers",
                 "--markdown-headings=atx",
-                markdown_file.name,
                 "-o",
                 tmp_path,
+                "--",
+                markdown_file.name,
             ],
             check=True,
             capture_output=True,
@@ -126,7 +163,7 @@ def get_tab_end_index(docs_service, doc_id, tab_id):
                 return 1
             return content[-1].get("endIndex", 1)
 
-    raise AuthOrConfigError(f"Tab '{tab_id}' not found in document '{doc_id}'")
+    raise NotFoundOrPermissionError(f"Tab '{tab_id}' not found in document '{doc_id}'")
 
 
 def extract_text_from_doc(doc):

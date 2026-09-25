@@ -41,6 +41,13 @@ def test_tab_write_styled_run_after_emoji_lands_on_the_right_text():
     doc = FakeDoc([])
     write_tab_content(FakeService(doc), "doc-x", "t.0", f"{MIC} **bold word** after\n")
     assert doc.plain_texts()[0] == f"{MIC} bold word after"
+    # Not just that the text reads back right, but that the bold=True
+    # style landed on EXACTLY "bold word" -- not shifted by one unit onto
+    # "old word " or "bold word " the way len()-based indexing would have
+    # done with the emoji preceding it.
+    bold_events = [ev for ev in doc.text_style_events if ev[2].get("bold")]
+    assert len(bold_events) == 1
+    assert bold_events[0][3] == "bold word"
 
 
 def test_smart_diff_insert_with_emoji_reads_back_exact():

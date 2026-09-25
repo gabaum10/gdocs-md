@@ -5,22 +5,37 @@ on failure, which the CLI layer turns into an exit code."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
 from . import auth, content, docs_api, registry
 from .config import resolve_account
-from .errors import AuthOrConfigError, DestructiveRefusedError, NotFoundOrPermissionError
+from .errors import (
+    AuthOrConfigError,
+    DestructiveRefusedError,
+    GdocsMdError,
+    MissingPandocError,
+    NotFoundOrPermissionError,
+    UsageError,
+)
 from .smart_update import smart_update_doc
 
+# Structural elements `get` can't read back as text, worth a loud WARNING
+# when they carry content. `sectionBreak` is deliberately NOT here: every
+# Docs body and tab body starts with a leading sectionBreak element that
+# carries no text at all, so including it meant `warnings` was non-empty
+# on every real document -- noise that buried the table warning that
+# actually matters (an agent can't use `warnings == []` as a signal if
+# it's never empty).
 _NON_PARAGRAPH_LABELS = {
     "table": "table(s)",
     "tableOfContents": "a table of contents",
-    "sectionBreak": "section break(s)",
 }
 
 
@@ -51,11 +66,31 @@ def extract_text_and_warnings(content_list):
 def _resolve_doc_id(args):
     raw = getattr(args, "url", None) or getattr(args, "doc_id", None)
     if not raw:
-        raise NotFoundOrPermissionError("Provide a doc ID or --url <url>")
+        raise UsageError("Provide a doc ID or --url <url>")
     url_match = re.search(r"/document/d/([a-zA-Z0-9_-]+)", raw)
     if url_match:
         return url_match.group(1)
     return raw
+
+
+def _atomic_write_text(path, content_str):
+    """Write `content_str` to `path` without ever leaving it truncated or
+    partially written: write to a sibling temp file first, then
+    `os.replace` it into place in one filesystem operation. A failed fetch
+    (auth, network, bad ID) that happens BEFORE this is ever called leaves
+    the target file completely untouched -- the old truncate-then-fetch
+    order zeroed a caller's local file on any failure."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=".gdocs-md-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content_str)
+        os.replace(tmp_path, path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
 
 
 def _emit_json(obj, file=None):
@@ -76,7 +111,12 @@ def _emit_json(obj, file=None):
 
 def cmd_auth_login(args, config):
     account = resolve_account(getattr(args, "account", None), config)
-    email = auth.run_login_flow(config, account, headless=getattr(args, "headless", False))
+    email = auth.run_login_flow(
+        config,
+        account,
+        headless=getattr(args, "headless", False),
+        timeout=getattr(args, "timeout", auth.DEFAULT_LOGIN_TIMEOUT),
+    )
     result = {"account": account, "email": email, "token_path": str(config.token_path(account))}
     if args.json:
         _emit_json(result)
@@ -107,199 +147,237 @@ def cmd_auth_status(args, config):
 
 
 def cmd_get(args, config):
+    """Read a Google Doc.
+
+    Output ordering (W3/L6 fix): nothing is written to `--output FILE`
+    (or stdout) until every fetch has succeeded. All text is buffered in
+    memory and written ONCE, at the very end, atomically (temp file +
+    rename) when `--output` is given -- a failed fetch never truncates or
+    partially overwrites a caller's existing file. Under `--json`, the
+    SAME rule applies to the JSON payload: with `--output`, the JSON goes
+    into the file (nothing prints to stdout); without it, the JSON goes to
+    stdout as usual. `--json` alone (no `--output`) is unchanged.
+    """
     account = resolve_account(args.account, config)
     doc_id = _resolve_doc_id(args)
     output_path = getattr(args, "output", None)
 
-    if output_path:
-        out = open(output_path, "w", encoding="utf-8")
-    else:
-        out = sys.stdout
+    import io
+
+    buf = io.StringIO()
 
     def emit(*print_args, **kwargs):
-        kwargs.setdefault("file", out)
+        kwargs.setdefault("file", buf)
         print(*print_args, **kwargs)
 
     result = {"doc_id": doc_id, "warnings": []}
 
+    def finish():
+        content_str = json.dumps(result, indent=2) + "\n" if args.json else buf.getvalue()
+        if output_path:
+            _atomic_write_text(output_path, content_str)
+        else:
+            sys.stdout.write(content_str)
+        for w in result["warnings"]:
+            print(f"[Warning] {w}", file=sys.stderr)
+        return result
+
     try:
-        try:
-            docs_service = docs_api.get_docs_service(config, account)
+        docs_service = docs_api.get_docs_service(config, account)
 
-            want_tab = getattr(args, "tab", None)
-            want_all_tabs = getattr(args, "all_tabs", False)
+        want_tab = getattr(args, "tab", None)
+        want_all_tabs = getattr(args, "all_tabs", False)
 
-            if want_tab or want_all_tabs:
-                doc, tabs = docs_api.fetch_tabs(docs_service, doc_id)
-                title = doc.get("title", "")
+        if want_tab or want_all_tabs:
+            doc, tabs = docs_api.fetch_tabs(docs_service, doc_id)
+            title = doc.get("title", "")
 
-                if want_all_tabs:
-                    all_tab_props = list(docs_api.enumerate_tabs(tabs))
-                    tab_texts = {}
-                    for props, _depth in all_tab_props:
-                        tab_id = props.get("tabId", "?")
-                        tab_obj = docs_api.find_tab_by_id(tabs, tab_id)
-                        tab_body = tab_obj.get("documentTab", {}).get("body", {}) if tab_obj else {}
-                        text, warns = extract_text_and_warnings(tab_body.get("content", []))
-                        result["warnings"].extend(warns)
-                        tab_texts[tab_id] = (props.get("title", tab_id), text)
-
-                    if args.json:
-                        result["title"] = title
-                        result["tabs"] = [
-                            {"tab_id": tid, "title": t, "text": txt} for tid, (t, txt) in tab_texts.items()
-                        ]
-                        _emit_json(result)
-                    else:
-                        if args.with_title and title:
-                            emit(f"# {title}")
-                            emit()
-                        for tid, (t, txt) in tab_texts.items():
-                            emit(f"# {t}")
-                            emit()
-                            emit(txt, end="")
-                            emit()
-                        for w in result["warnings"]:
-                            print(f"[Warning] {w}", file=sys.stderr)
-                    return result
-
-                tab_obj = docs_api.find_tab_by_id(tabs, want_tab)
-                if tab_obj is None:
-                    all_ids = [p.get("tabId", "?") for p, _ in docs_api.enumerate_tabs(tabs)]
-                    raise NotFoundOrPermissionError(
-                        f"Tab '{want_tab}' not found. Available: {', '.join(all_ids)}"
-                    )
-                tab_body = tab_obj.get("documentTab", {}).get("body", {})
-                text, warns = extract_text_and_warnings(tab_body.get("content", []))
-                result["warnings"].extend(warns)
+            if want_all_tabs:
+                all_tab_props = list(docs_api.enumerate_tabs(tabs))
+                tab_texts = {}
+                for props, _depth in all_tab_props:
+                    tab_id = props.get("tabId", "?")
+                    tab_obj = docs_api.find_tab_by_id(tabs, tab_id)
+                    tab_body = tab_obj.get("documentTab", {}).get("body", {}) if tab_obj else {}
+                    text, warns = extract_text_and_warnings(tab_body.get("content", []))
+                    result["warnings"].extend(warns)
+                    tab_texts[tab_id] = (props.get("title", tab_id), text)
 
                 if args.json:
                     result["title"] = title
-                    result["tab_id"] = want_tab
-                    result["text"] = text
-                    _emit_json(result)
+                    result["tabs"] = [
+                        {"tab_id": tid, "title": t, "text": txt} for tid, (t, txt) in tab_texts.items()
+                    ]
                 else:
                     if args.with_title and title:
                         emit(f"# {title}")
                         emit()
-                    emit(text, end="")
-                    for w in result["warnings"]:
-                        print(f"[Warning] {w}", file=sys.stderr)
-                return result
+                    for tid, (t, txt) in tab_texts.items():
+                        emit(f"# {t}")
+                        emit()
+                        emit(txt, end="")
+                        emit()
+                return finish()
 
-            # Default: fetch with includeTabsContent to count tabs, warn if
-            # multi-tab. With includeTabsContent=True the top-level
-            # doc['body'] is EMPTY -- all content lives in
-            # tabs[0].documentTab.body. Fall back to top-level body only for
-            # legacy docs with no tabs at all.
-            doc, tabs = docs_api.fetch_tabs(docs_service, doc_id)
-            all_tab_props = list(docs_api.enumerate_tabs(tabs))
-            if len(all_tab_props) > 1:
-                tab_ids = [p.get("tabId", "?") for p, _ in all_tab_props]
-                notice = (
-                    f"doc has {len(all_tab_props)} tabs ({', '.join(tab_ids)}); "
-                    f"reading tab 0. Use --tab <id> or --all-tabs to be explicit."
+            tab_obj = docs_api.find_tab_by_id(tabs, want_tab)
+            if tab_obj is None:
+                all_ids = [p.get("tabId", "?") for p, _ in docs_api.enumerate_tabs(tabs)]
+                raise NotFoundOrPermissionError(
+                    f"Tab '{want_tab}' not found. Available: {', '.join(all_ids)}"
                 )
-                if not args.json:
-                    print(f"[notice] {notice}", file=sys.stderr)
-                result["notice"] = notice
-
-            if tabs:
-                content_list = tabs[0].get("documentTab", {}).get("body", {}).get("content", [])
-            else:
-                content_list = doc.get("body", {}).get("content", [])
-            text, warns = extract_text_and_warnings(content_list)
+            tab_body = tab_obj.get("documentTab", {}).get("body", {})
+            text, warns = extract_text_and_warnings(tab_body.get("content", []))
             result["warnings"].extend(warns)
-            insertions, deletions = content.extract_suggestions_from_doc(
-                {"body": {"content": content_list}}
-            )
-
-            title = doc.get("title", "")
 
             if args.json:
                 result["title"] = title
+                result["tab_id"] = want_tab
                 result["text"] = text
-                result["suggestions"] = {"insertions": insertions, "deletions": deletions}
             else:
                 if args.with_title and title:
                     emit(f"# {title}")
                     emit()
                 emit(text, end="")
-                if insertions or deletions:
-                    emit()
-                    emit(content.format_suggestions(insertions, deletions), end="")
+            return finish()
 
-            drive_service = docs_api.get_drive_service(config, account)
-            comments = content.fetch_comments(drive_service, doc_id)
-            if args.json:
-                result["comments"] = comments
-                _emit_json(result)
-            else:
-                if comments:
-                    emit()
-                    emit(content.format_comments(comments), end="")
-                for w in result["warnings"]:
-                    print(f"[Warning] {w}", file=sys.stderr)
+        # Default: fetch with includeTabsContent to count tabs, warn if
+        # multi-tab. With includeTabsContent=True the top-level
+        # doc['body'] is EMPTY -- all content lives in
+        # tabs[0].documentTab.body. Fall back to top-level body only for
+        # legacy docs with no tabs at all.
+        doc, tabs = docs_api.fetch_tabs(docs_service, doc_id)
+        all_tab_props = list(docs_api.enumerate_tabs(tabs))
+        if len(all_tab_props) > 1:
+            tab_ids = [p.get("tabId", "?") for p, _ in all_tab_props]
+            notice = (
+                f"doc has {len(all_tab_props)} tabs ({', '.join(tab_ids)}); "
+                f"reading tab 0. Use --tab <id> or --all-tabs to be explicit."
+            )
+            if not args.json:
+                print(f"[notice] {notice}", file=sys.stderr)
+            result["notice"] = notice
 
-            return result
-
-        except NotFoundOrPermissionError:
-            raise
-        except Exception as e:
-            if "400" not in str(e) and "not supported" not in str(e).lower():
-                raise NotFoundOrPermissionError(f"Failed to fetch document '{doc_id}': {e}") from e
-
-        # Fallback: Drive export (uploaded .docx, Sheets, etc.)
-        drive_service = docs_api.get_drive_service(config, account)
-        file_meta = drive_service.files().get(fileId=doc_id, fields="name,mimeType").execute()
-        mime_type = file_meta.get("mimeType", "")
-        title = file_meta.get("name", "")
-
-        if "google-apps" in mime_type:
-            raw = drive_service.files().export(fileId=doc_id, mimeType="text/plain").execute()
-            text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+        if tabs:
+            content_list = tabs[0].get("documentTab", {}).get("body", {}).get("content", [])
         else:
-            from googleapiclient.http import MediaIoBaseDownload
-            import io
-            import tempfile
-            import subprocess
+            content_list = doc.get("body", {}).get("content", [])
+        text, warns = extract_text_and_warnings(content_list)
+        result["warnings"].extend(warns)
+        # Suggestions live in the SAME per-tab content list read above, not
+        # the top-level `doc` -- with includeTabsContent=True the
+        # top-level doc['body'] is empty, so passing `doc` straight
+        # through here would silently show no suggestions on any tabbed
+        # document.
+        insertions, deletions = content.extract_suggestions_from_doc(
+            {"body": {"content": content_list}}
+        )
 
-            request = drive_service.files().get_media(fileId=doc_id)
-            buffer = io.BytesIO()
-            downloader = MediaIoBaseDownload(buffer, request)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
-
-            suffix = ".docx" if "word" in mime_type.lower() or title.endswith(".docx") else ".bin"
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-                tmp.write(buffer.getvalue())
-                tmp_path = tmp.name
-            try:
-                proc = subprocess.run(
-                    ["pandoc", "-f", "docx", "-t", "plain", "--wrap=none", tmp_path],
-                    capture_output=True, text=True, timeout=30,
-                )
-                text = proc.stdout if proc.returncode == 0 else buffer.getvalue().decode(
-                    "utf-8", errors="replace"
-                )
-            finally:
-                os.unlink(tmp_path)
+        title = doc.get("title", "")
 
         if args.json:
             result["title"] = title
             result["text"] = text
-            _emit_json(result)
+            result["suggestions"] = {"insertions": insertions, "deletions": deletions}
         else:
             if args.with_title and title:
                 emit(f"# {title}")
                 emit()
             emit(text, end="")
-        return result
-    finally:
-        if output_path and out is not sys.stdout:
-            out.close()
-            print(f"Written to {output_path}", file=sys.stderr)
+            if insertions or deletions:
+                emit()
+                emit(content.format_suggestions(insertions, deletions), end="")
+
+        drive_service = docs_api.get_drive_service(config, account)
+        comments = content.fetch_comments(drive_service, doc_id)
+        if args.json:
+            result["comments"] = comments
+        else:
+            if comments:
+                emit()
+                emit(content.format_comments(comments), end="")
+
+        return finish()
+
+    except GdocsMdError:
+        # W2 fix: any of OUR errors (a missing token, a bad account, a
+        # tab that doesn't exist) propagates as itself. Only an
+        # unrecognized failure below falls through to the Drive-export
+        # fallback path.
+        raise
+    except Exception as e:
+        # Fall through to the Drive-export fallback ONLY for a genuine
+        # HTTP 400 (the Docs API's "not a native Doc" signal) or the
+        # "not supported" text some client-library errors carry -- NOT
+        # for any exception whose str() happens to contain "400"
+        # somewhere (the request URL embeds the doc ID, so a doc ID like
+        # "...400..." previously tripped this on ANY error, including a
+        # 404 or an auth failure).
+        #
+        # Also: only relabel an actual HttpError as "failed to fetch
+        # document" here. Anything else (a RefreshError from a revoked
+        # token surfacing mid-call, or any other exception) must propagate
+        # UNCHANGED -- this handler's job is "should I try the Drive
+        # fallback", not "every failure in this block means the doc
+        # wasn't found". Relabeling a RefreshError as
+        # NotFoundOrPermissionError here would hide it from cli.py's own
+        # classifier, which knows to map RefreshError to the auth code (3)
+        # instead of not-found (4).
+        try:
+            from googleapiclient.errors import HttpError
+        except ImportError:  # pragma: no cover
+            HttpError = ()  # noqa: N806
+        if not (HttpError and isinstance(e, HttpError)):
+            raise
+        status = getattr(getattr(e, "resp", None), "status", None)
+        if status != 400 and "not supported" not in str(e).lower():
+            raise NotFoundOrPermissionError(f"Failed to fetch document '{doc_id}': {e}") from e
+
+    # Fallback: Drive export (uploaded .docx, Sheets, etc.)
+    drive_service = docs_api.get_drive_service(config, account)
+    file_meta = drive_service.files().get(fileId=doc_id, fields="name,mimeType").execute()
+    mime_type = file_meta.get("mimeType", "")
+    title = file_meta.get("name", "")
+
+    if "google-apps" in mime_type:
+        raw = drive_service.files().export(fileId=doc_id, mimeType="text/plain").execute()
+        text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+    else:
+        from googleapiclient.http import MediaIoBaseDownload
+        import subprocess
+
+        docs_api.check_pandoc()
+
+        request = drive_service.files().get_media(fileId=doc_id)
+        buffer = io.BytesIO()
+        downloader = MediaIoBaseDownload(buffer, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+
+        suffix = ".docx" if "word" in mime_type.lower() or title.endswith(".docx") else ".bin"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(buffer.getvalue())
+            tmp_path = tmp.name
+        try:
+            proc = subprocess.run(
+                ["pandoc", "-f", "docx", "-t", "plain", "--wrap=none", "--", tmp_path],
+                capture_output=True, text=True, timeout=30,
+            )
+            text = proc.stdout if proc.returncode == 0 else buffer.getvalue().decode(
+                "utf-8", errors="replace"
+            )
+        finally:
+            os.unlink(tmp_path)
+
+    if args.json:
+        result["title"] = title
+        result["text"] = text
+    else:
+        if args.with_title and title:
+            emit(f"# {title}")
+            emit()
+        emit(text, end="")
+    return finish()
 
 
 # ---------------------------------------------------------------------------
@@ -316,15 +394,19 @@ def cmd_create(args, config):
 
     reg = registry.load_registry(config.registry_file)
     if str(file_path) in reg:
-        raise AuthOrConfigError(
+        raise UsageError(
             "Document already exists for this file. Use 'update' to modify "
             "it, or remove it from the registry first."
         )
 
     title = args.title if args.title else file_path.stem
 
-    docx_path = docs_api.convert_markdown_to_docx(file_path)
+    # Auth BEFORE the pandoc conversion (W19): if get_drive_service fails
+    # (no token, expired refresh), there's no temp docx yet to leak. The
+    # old order created the temp file first, outside any try/finally that
+    # covered THIS call, so an auth failure here left it in /tmp forever.
     drive_service = docs_api.get_drive_service(config, account)
+    docx_path = docs_api.convert_markdown_to_docx(file_path)
 
     try:
         file_metadata = {"name": title, "mimeType": "application/vnd.google-apps.document"}
@@ -342,22 +424,45 @@ def cmd_create(args, config):
         ).execute()
 
         doc_id = file["id"]
-        reg[str(file_path)] = {
-            "doc_id": doc_id,
-            "url": file["webViewLink"],
-            "title": title,
-            "created": datetime.now().isoformat(),
-            "updated": file["modifiedTime"],
-        }
-        registry.save_registry(config.registry_file, reg)
+        # The remote write already landed by this point -- everything
+        # from here on is local bookkeeping. If it fails (unwritable
+        # registry dir, disk full, W4 lock contention), that must NOT
+        # look like "create failed": the doc exists, doc_id and url are
+        # real, and swallowing them here is exactly what pushes a caller
+        # to retry `create` on the same file, which the duplicate check
+        # can't catch (nothing was registered) -- a second doc. Warn
+        # loudly and report what actually happened (W10).
+        registered = True
+        registry_warning = None
+        try:
+            reg[str(file_path)] = {
+                "doc_id": doc_id,
+                "url": file["webViewLink"],
+                "title": title,
+                "created": datetime.now().isoformat(),
+                "updated": file["modifiedTime"],
+            }
+            registry.save_registry(config.registry_file, reg)
+        except GdocsMdError as e:
+            registered = False
+            registry_warning = (
+                f"Document was created (doc_id={doc_id}) but could NOT be registered: "
+                f"{e.message}. Do not re-run 'create' on this file -- it would make a "
+                f"SECOND doc, since nothing here caught the first. Register it "
+                f"manually, or use 'update {doc_id} {file_path}' going forward."
+            )
 
-        result = {"doc_id": doc_id, "url": file["webViewLink"], "title": title}
+        result = {"doc_id": doc_id, "url": file["webViewLink"], "title": title, "registered": registered}
+        if registry_warning:
+            result["warning"] = registry_warning
         if args.json:
             _emit_json(result)
         else:
             print(f"Created: {result['url']}")
             print(f"Doc ID:  {result['doc_id']}")
             print(f"Title:   {result['title']}")
+            if registry_warning:
+                print(f"[Warning] {registry_warning}", file=sys.stderr)
         return result
     finally:
         if os.path.exists(docx_path):
@@ -393,7 +498,7 @@ def cmd_update(args, config):
 
     if args.tab:
         if not args.input:
-            raise AuthOrConfigError("--input <file-path> is required when --tab is specified")
+            raise UsageError("--input <file-path> is required when --tab is specified")
         file_path = Path(args.input).resolve()
         if not file_path.exists():
             raise NotFoundOrPermissionError(f"File not found: {file_path}")
@@ -422,7 +527,7 @@ def cmd_update(args, config):
         return result
 
     if not args.file:
-        raise AuthOrConfigError("<file-path> is required for whole-document update (or use --tab with --input)")
+        raise UsageError("<file-path> is required for whole-document update (or use --tab with --input)")
 
     file_path = Path(args.file).resolve()
     if not file_path.exists():

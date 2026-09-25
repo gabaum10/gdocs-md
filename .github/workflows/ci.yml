@@ -17,18 +17,28 @@ jobs:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install pandoc
         run: sudo apt-get update && sudo apt-get install -y pandoc
 
+      # v3 of this action has no python-version input at all (GHA silently
+      # warns "Unexpected input" and ignores it, so every matrix leg ran
+      # whatever .python-version said -- 3.12 on every leg, unnoticed).
+      # v10 accepts it and sets UV_PYTHON accordingly.
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           python-version: ${{ matrix.python-version }}
+          version: "0.11.15"
+
+      - name: Prove the interpreter actually matches the matrix leg
+        run: |
+          uv run python --version
+          uv run python -c "import sys; assert sys.version_info[:2] == tuple(int(p) for p in '${{ matrix.python-version }}'.split('.')), sys.version"
 
       - name: Sync dependencies
-        run: uv sync --group dev
+        run: uv sync --locked --group dev
 
       - name: Run test suite
         run: uv run pytest -v

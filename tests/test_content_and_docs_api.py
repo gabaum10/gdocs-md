@@ -45,11 +45,39 @@ def test_extract_text_and_warnings_flags_multiple_kinds_once_each():
     content = [
         {"table": {}},
         {"table": {}},
-        {"sectionBreak": {}},
+        {"tableOfContents": {}},
         {"paragraph": {"elements": []}},
     ]
     _, warnings = extract_text_and_warnings(content)
     assert len(warnings) == 2  # deduplicated per kind, not per occurrence
+
+
+def test_extract_text_and_warnings_never_flags_a_leading_section_break():
+    # Every real Docs body/tab body starts with a sectionBreak element
+    # that carries no text at all. Warning on it made `warnings`
+    # non-empty on every real `get`, which buried the table warning that
+    # actually matters and meant an agent could never use `warnings == []`
+    # as a signal. Positive control: reverting this (putting sectionBreak
+    # back in the label map) makes this assert fail -- see
+    # test_positive_control_section_break_would_warn_if_labeled below.
+    content = [
+        {"endIndex": 1, "sectionBreak": {"sectionStyle": {}}},
+        {"paragraph": {"elements": [{"textRun": {"content": "hello\n"}}]}},
+    ]
+    _, warnings = extract_text_and_warnings(content)
+    assert warnings == []
+
+
+def test_positive_control_section_break_would_warn_if_labeled(monkeypatch):
+    from gdocs_md import commands
+
+    monkeypatch.setitem(commands._NON_PARAGRAPH_LABELS, "sectionBreak", "section break(s)")
+    content = [
+        {"endIndex": 1, "sectionBreak": {"sectionStyle": {}}},
+        {"paragraph": {"elements": [{"textRun": {"content": "hello\n"}}]}},
+    ]
+    _, warnings = extract_text_and_warnings(content)
+    assert warnings != []
 
 
 @pytest.mark.skipif(not __import__("shutil").which("pandoc"), reason="pandoc not installed")

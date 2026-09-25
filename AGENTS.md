@@ -5,21 +5,29 @@ actually does.
 
 ## Install
 
+**Not on PyPI.** `uv tool install gdocs-md` does not work. Install from
+git, pinned to a tag (the repo is currently private -- see README.md's
+Install section for the access and upgrade details):
+
 ```sh
-uv tool install gdocs-md
+uv tool install git+https://github.com/gabaum10/gdocs-md@v0.1.0
 ```
 
-Requires `pandoc` on PATH for `create` and `update --replace-all` (not for
-`get`, `update` in smart-diff or `--tab` mode, `tabs`, `sheets`, or `list`).
+Requires `pandoc` >= 2.11.2 on PATH for `create` and `update --replace-all`
+(not for `get`, `update` in smart-diff or `--tab` mode, `tabs`, `sheets`,
+or `list` -- `get`'s Drive-export fallback for uploaded/non-native files
+is the one exception: it also needs pandoc).
 
 ## Flag ordering
 
-`--config-file`, `--credentials-dir`, `--oauth-client`, and `--registry`
-are top-level flags: they must come BEFORE the subcommand
-(`gdocs-md --credentials-dir DIR list`, not `gdocs-md list --credentials-dir
-DIR` -- the latter is a usage error, exit `USAGE`). `--account` and
-`--json` are per-subcommand flags: they come AFTER the subcommand
-(`gdocs-md list --json`, not `gdocs-md --json list`).
+Every global flag -- `--config-file`, `--credentials-dir`,
+`--oauth-client`, `--registry`, `--account`, `--json` -- works in EITHER
+position: before the subcommand (`gdocs-md --account X get ...`) or after
+it (`gdocs-md get ... --account X`). Both forms are equivalent; use
+whichever reads better for the call you're building. (Prior to the fix
+round this only worked in one position per flag; if you're holding an
+older AGENTS.md or a cached memory of this tool, both positions now work
+for everything.)
 
 ## Before you do anything: config and auth
 
@@ -110,9 +118,8 @@ full rewrite of just that tab acceptable? Use `--tab`. Otherwise, and
 only if you're fine losing every tab's comments, use `--replace-all
 --force`.
 
-`--json` on all three modes emits `{"mode", "doc_id", "url"?, "changed"?,
-"unchanged"?, "ops"?, "tab_id"?, "dry_run"}` (fields vary by mode -- see
-the exit-code/shape table below for the concrete keys per mode).
+`--json` shape (all three modes, dry-run and not, with concrete examples):
+see "## JSON schemas" below.
 
 ### `tabs <doc_id> [--create --title T [--index N] [--parent ID]]`
 
@@ -131,28 +138,116 @@ Reads a spreadsheet range as a markdown table. Read-only.
 Lists the local registry (file path -> doc_id/url/title/timestamps). No
 network call.
 
-### `auth login --account <name> [--headless]` / `auth status --account <name>`
+### `auth login --account <name> [--headless] [--timeout SECONDS]` / `auth status --account <name>`
 
 `login` runs the OAuth consent flow and saves a token. `--headless` binds
-the loopback server to `0.0.0.0:8085` instead of opening a local browser
-(for a machine with no display). `status` checks whether a token exists,
+the loopback server to `0.0.0.0:8085` (reachable from another machine on
+the network) instead of opening a local browser on this one -- there is no
+other supported flow; if a local browser can't be opened and `--headless`
+wasn't passed, `login` now ERRORS (exit `AUTH_OR_CONFIG`) rather than
+silently falling back to the network-bound server on your behalf. An
+agent cannot complete the interactive consent step itself either way --
+this needs a human at a browser. `--timeout` (default 180s) bounds how
+long it waits for that human. `status` checks whether a token exists,
 refreshes if needed, and confirms it against a live API call.
+
+## JSON schemas
+
+Every shape below is what a SUCCESSFUL call's `--json` produces on stdout
+(or the `--output` file, for `get`). A failed call's shape is always the
+same regardless of command: `{"error": "<message>", "exit_code": <int>}`
+on stderr -- see "`--json`" below.
+
+**`get`** (default, single/no-tab):
+```json
+{"doc_id": "abc123", "warnings": [], "title": "My Doc", "text": "...",
+ "suggestions": {"insertions": [], "deletions": []}, "comments": [],
+ "notice": "doc has 2 tabs (...); reading tab 0. ..."}
+```
+`notice` is present only when the doc is multi-tab and neither `--tab` nor
+`--all-tabs` was given. `--tab <id>`: same shape minus `suggestions`/
+`comments`, plus `"tab_id"`. `--all-tabs`: minus `text`/`suggestions`/
+`comments`, plus `"tabs": [{"tab_id", "title", "text"}, ...]`.
+
+**`create`**:
+```json
+{"doc_id": "abc123", "url": "https://docs.google.com/document/d/abc123/edit",
+ "title": "My Doc", "registered": true}
+```
+`registered: false` plus a `"warning"` string means the Drive doc WAS
+created (`doc_id`/`url` are real) but the local registry write failed --
+do not re-run `create` on the same file (see the warning text for what to
+do instead).
+
+**`update` (smart diff, the default)**:
+```json
+{"mode": "smart_diff", "doc_id": "abc123",
+ "url": "https://docs.google.com/document/d/abc123/edit",
+ "changed": 2, "unchanged": 5, "ops": 6, "tab_id": null, "dry_run": false}
+```
+**This is how `--dry-run --json` tells you whether anything would
+change: the `changed` field.** `changed: 0` (with `ops: 0`) means nothing
+would be written -- the doc already matches. `changed` counts diff
+OPCODES, not paragraphs (a run of 5 consecutive new paragraphs is one
+`insert` opcode, so `changed` can be smaller than the number of paragraphs
+actually touched -- use `ops` for a finer-grained sense of how much would
+change, though `ops` counts API requests, not paragraphs either). With
+`--dry-run`, `dry_run: true` and NOTHING is written regardless of
+`changed`.
+
+**`update --tab`**:
+```json
+{"doc_id": "abc123", "tab_id": "t.1", "url": "https://docs.google.com/document/d/abc123/edit"}
+```
+`--dry-run` with `--tab`: `{"dry_run": true, "tab_id": "t.1", "chars": 512}`
+-- there is no `changed`/`ops` here. `--tab` is a full rewrite, not a
+diff: it always replaces everything, so "would anything change" isn't a
+meaningful question for this mode the way it is for smart diff.
+
+**`update --replace-all`**:
+```json
+{"mode": "replace_all", "doc_id": "abc123",
+ "url": "https://docs.google.com/document/d/abc123/edit", "modified": "2026-01-01T00:00:00.000Z"}
+```
+`--dry-run` with `--replace-all`: `{"dry_run": true, "mode": "replace_all", "tab_count": 2}`
+-- also no `changed`/`ops`; like `--tab`, this mode always replaces
+everything.
+
+**`tabs`** (list): `{"doc_id": "abc123", "tabs": [{"tab_id", "title", "index", "depth", "child_count"}, ...]}`.
+`tabs --create`: `{"doc_id", "tab_id", "title", "url", "warning": null}`
+(`warning` is set when `--parent` was used -- the new tab isn't
+automatically the write target).
+
+**`sheets`**: `{"spreadsheet_id", "range", "values": [["a","b"],[...]]}`
+(rows as returned by the Sheets API; `--list-sheets` instead gives
+`{"spreadsheet_id", "sheets": ["Sheet1", "Sheet2"]}`).
+
+**`list`**: `{"registry": {"<local file path>": {"doc_id", "url", "title", "created", "updated"}, ...}}`.
+
+**`auth login`**: `{"account": "personal", "email": "you@example.com", "token_path": "/path/to/token.json"}`.
+
+**`auth status`**: `{"configured": true, "account": "personal", "token_path": "...", "email": "you@example.com", "error": null}`
+(`configured: false` on failure, with `error` set and `email: null` --
+this shape appears on stdout even though the command ALSO exits
+non-zero in that case, so both are readable).
 
 ## Exit codes
 
 | Code | Name | Meaning |
 |---|---|---|
 | 0 | OK | success |
-| 2 | USAGE | bad arguments, no subcommand, or an argparse-level error |
-| 3 | AUTH_OR_CONFIG | no account resolved, missing/unreadable token, missing/malformed config or oauth-client file |
-| 4 | NOT_FOUND_OR_PERMISSION | doc/tab/file not found, or the API denied access |
+| 2 | USAGE | bad/missing arguments (a required `<file>`, `--input` with `--tab`, a doc ID), no subcommand, bare `gdocs-md auth` with no `login`/`status`, or ANY argparse-level parse error (bad flag, invalid choice) -- these all route through the same `UsageError`, so `--json` gives valid JSON on stderr for a parse error too, not raw argparse text |
+| 3 | AUTH_OR_CONFIG | no account resolved, missing/unreadable token, missing/malformed config or oauth-client file, an HTTP 401 from a live call, or a `RefreshError` (revoked/invalid refresh token) |
+| 4 | NOT_FOUND_OR_PERMISSION | doc/tab/file/table-index not found, "document already exists" is NOT this (it's USAGE), or an HTTP 403/404 from a live call |
 | 5 | UNREPRESENTABLE_DIFF | smart-diff can't represent this change (currently: multi-tab doc without `--tab`/`--replace-all`) -- retry with one of those |
 | 6 | DESTRUCTIVE_REFUSED | a destructive op (`--replace-all` on a multi-tab doc) was refused because `--force` wasn't passed |
-| 7 | MISSING_PANDOC | pandoc isn't on PATH (only for `create` / `--replace-all`) |
-| 8 | API_ERROR | any other Google API failure |
+| 7 | MISSING_PANDOC | pandoc isn't on PATH, isn't runnable, or is older than 2.11.2 (named in the message) -- for `create`, `update --replace-all`, and `get`'s Drive-export fallback for non-native files |
+| 8 | API_ERROR | any other Google API failure (any HTTP status besides 401/403/404), Ctrl-C, or any OTHER unhandled exception (a last-resort catch-all in `cli.py` -- nothing escapes as a bare traceback / exit 1; set `GDOCS_MD_DEBUG=1` to also print the traceback to stderr) |
 
 A caller should branch on the exit code alone; the message text is for
-humans and may change between versions. Codes never get repurposed --
+humans and may change between versions. `tests/test_exit_code_table.py`
+walks every code above against a real code path, so this table can't
+silently drift from what the code does. Codes never get repurposed --
 see `src/gdocs_md/exit_codes.py`.
 
 ## `--json`
@@ -184,8 +279,11 @@ either way; don't parse stderr as part of a successful result.
   be diffed reliably at all -- the table's cells aren't top-level body
   paragraphs, so they're invisible to the diff. Use `--tab` or
   `--replace-all` for any doc where tables matter.
-- **`get` drops tables, TOC, and section breaks silently unless you're
-  watching for the warning.** See `get`'s section above.
+- **`get` drops tables and TOC content silently unless you're watching
+  for the warning.** See `get`'s section above. (Section breaks are
+  deliberately NOT warned on -- every real doc/tab starts with one and it
+  never carries text, so warning on it would fire on every single `get`
+  and bury the table warning that matters.)
 - **Deleting the doc's own last paragraph leaves an empty paragraph
   behind.** Its trailing newline is immutable, so smart-diff falls back to
   content-only deletion. Same for a paragraph deletion that would delete
@@ -206,6 +304,20 @@ either way; don't parse stderr as part of a successful result.
   vertical-tab character inside the paragraph's plain text.
 - **The registry is one shared file, not split per account.** `create`
   records whichever account made the doc; `list` doesn't distinguish.
+- **A new list item inserted directly next to an existing list joins that
+  list**, inheriting its glyph preset and nesting level -- there's no
+  "start a new, separate list here" signal in plain markdown, so a new
+  top-level item placed right before an existing sub-item comes out
+  nested, and a new ordered item butted against an unordered list takes
+  the unordered list's preset. This is a property of the insert-anchor
+  model (an inserted list item's bullet inherits from whatever paragraph
+  it lands next to when that paragraph is already bulleted -- see F1 in
+  `smart_update.py`), not a bug fixed in this build.
+- **`update`'s registry lookup only affects the smart-diff and
+  `--replace-all` paths**, and only for updating the `updated` timestamp
+  on an already-registered doc; a doc not in the registry (e.g. one
+  created outside this tool) still updates fine, it's just not tracked
+  locally.
 
 ## Scopes and token compatibility
 
@@ -237,3 +349,15 @@ refresh. Read the file's own `scopes` field.
 
 Every key is optional. Precedence for each: CLI flag > env var > this file
 > built-in default. Full table: README.md.
+
+An unrecognized key (a typo like `credential_dir`) is warned about on
+stderr and otherwise ignored -- it does NOT fail the command, and the
+corresponding setting falls back through the rest of the precedence chain
+as if the key weren't there at all.
+
+**Relative paths resolve against the current working directory**, not the
+config file's own directory -- `"credentials_dir": "../creds"` in
+`~/.config/gdocs-md/config.json` means a different real path depending on
+where you invoke `gdocs-md` from. Use an absolute path (or `~/...`, which
+IS expanded) in the config file if you need it to mean the same thing
+regardless of cwd.

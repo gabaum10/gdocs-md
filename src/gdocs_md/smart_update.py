@@ -97,7 +97,18 @@ def extract_paragraphs_with_positions(doc, tab_body=None):
                 "plain": plain,
                 "style": pstyle.get("namedStyleType", "NORMAL_TEXT"),
                 "bullet": "bullet" in para,
-                "indent": bool(pstyle.get("indentStart", {}).get("magnitude", 0)),
+                # A bulleted paragraph's own indentStart is the Docs API's
+                # list indentation, not this tool's separate blockquote
+                # convention -- masking it out here (L2a) is what stops an
+                # edited list item's own list indent from ever being read
+                # as "this needs a blockquote-indent reset". See
+                # style_requests_for_unit for the other half (never
+                # touching indent for a list_item target, and always
+                # resetting it after deleteParagraphBullets, since the API
+                # leaves visual indent behind that a bullet removal alone
+                # doesn't clear).
+                "indent": bool(pstyle.get("indentStart", {}).get("magnitude", 0))
+                and "bullet" not in para,
                 "next_is_paragraph": next_elem is not None and "paragraph" in next_elem,
             }
         )
@@ -128,6 +139,19 @@ def _find_anchor_paragraph(doc_paragraphs, position):
     return None
 
 
+def _chain_applies(previous_insert_start, current_insert_start):
+    """Whether the insert op currently being processed should inherit the
+    TARGET state of the previously-APPLIED insert op, instead of a fresh
+    `_find_anchor_paragraph` lookup against the original (pre-batch) doc --
+    true exactly when the two share the same doc_start, i.e. they're part
+    of the same same-position stacked-insert run (L1). Factored out as its
+    own function so a test can monkeypatch it to always return False and
+    demonstrate that the L1 regression tests actually depend on this
+    chaining -- see test_smart_update_l1.py's positive control.
+    """
+    return previous_insert_start is not None and previous_insert_start == current_insert_start
+
+
 def _paragraph_state(para):
     """The (style, bullet, indent) triple `style_requests_for_unit` diffs
     against -- either a real extracted paragraph, or the safe default for
@@ -135,6 +159,28 @@ def _paragraph_state(para):
     if para is None:
         return {"style": "NORMAL_TEXT", "bullet": False, "indent": False}
     return {"style": para["style"], "bullet": para["bullet"], "indent": para["indent"]}
+
+
+def _target_state_for_unit(unit):
+    """The (style, bullet, indent) triple a diff unit converges its
+    paragraph TO, regardless of whether a request actually had to be
+    emitted to get there (if the prior state already matched, no request
+    fires, but the resulting state is still this).
+
+    This is also what makes stacked inserts (see the chaining comment in
+    smart_update_doc's main request loop) correct: the paragraph a SECOND
+    inserted-at-the-same-position unit lands inside is the first one's
+    freshly-written paragraph, not the original doc's neighbour -- so its
+    prior_state has to be this function's output for the op applied just
+    before it, not a fresh anchor lookup.
+    """
+    kind = unit["kind"]
+    block = unit["block"]
+    return {
+        "style": block.get("style", "NORMAL_TEXT") if kind == "paragraph" else "NORMAL_TEXT",
+        "bullet": kind == "list_item",
+        "indent": kind == "blockquote_line",
+    }
 
 
 def style_requests_for_unit(unit, para_start, para_end, target_tab_id, prior_state):
@@ -145,74 +191,92 @@ def style_requests_for_unit(unit, para_start, para_end, target_tab_id, prior_sta
     [para_start, para_end) just inserted or replaced.
 
     `prior_state` is the anchor paragraph's state (insert) or the replaced
-    paragraph's state (replace), as returned by `_paragraph_state`. Emits a
-    request only when the target state differs from it -- this is both F1
-    (skip createParagraphBullets, and therefore preserve listId/
-    nestingLevel, when the paragraph is already bulleted the way we want)
-    and F3 (emit the reset when moving OUT of a style/bullet/indent, not
-    just into one).
+    paragraph's state (replace), as returned by `_paragraph_state` (or, for
+    a chained stacked insert, `_target_state_for_unit` of the op applied
+    just before this one). Emits a request only when the target state
+    differs from it -- this is both F1 (skip createParagraphBullets, and
+    therefore preserve listId/nestingLevel, when the paragraph is already
+    bulleted the way we want) and F3 (emit the reset when moving OUT of a
+    style/bullet/indent, not just into one).
+
+    Indent and bullet are NOT independent (L2): the Docs API reports list
+    indentation through the same `indentStart`/`indentFirstLine` fields
+    this tool uses for its own blockquote convention, so:
+      - indent is never touched when the TARGET is a list_item -- list
+        indentation is intrinsic to being in a list, not something this
+        tool manages, and `prior_state["indent"]` is already masked to
+        False for a bulleted prior paragraph (extract_paragraphs_with_
+        positions) so a list-item-to-list-item edit doesn't see a false
+        "needs reset" either.
+      - whenever a deleteParagraphBullets fires and the target ISN'T a
+        blockquote line, an indent-to-zero reset is forced regardless of
+        what prior_state says -- the API's own delete-bullet behavior
+        preserves the paragraph's visual (former list) indent, which nothing
+        else would otherwise clear.
     """
     kind = unit["kind"]
     block = unit["block"]
+    target = _target_state_for_unit(unit)
     rng = {"startIndex": para_start, "endIndex": para_end}
     if target_tab_id:
         rng["tabId"] = target_tab_id
 
     requests = []
 
-    target_style = block.get("style", "NORMAL_TEXT") if kind == "paragraph" else "NORMAL_TEXT"
-    if prior_state["style"] != target_style:
+    if prior_state["style"] != target["style"]:
         requests.append(
             {
                 "updateParagraphStyle": {
                     "range": rng,
-                    "paragraphStyle": {"namedStyleType": target_style},
+                    "paragraphStyle": {"namedStyleType": target["style"]},
                     "fields": "namedStyleType",
                 }
             }
         )
 
-    target_bullet = kind == "list_item"
-    if target_bullet and not prior_state["bullet"]:
+    just_deleted_bullet = False
+    if target["bullet"] and not prior_state["bullet"]:
         preset = (
             "BULLET_DISC_CIRCLE_SQUARE"
             if block.get("list_type") == "unordered"
             else "NUMBERED_DECIMAL_ALPHA_ROMAN"
         )
         requests.append({"createParagraphBullets": {"range": rng, "bulletPreset": preset}})
-    elif not target_bullet and prior_state["bullet"]:
+    elif not target["bullet"] and prior_state["bullet"]:
         requests.append({"deleteParagraphBullets": {"range": rng}})
+        just_deleted_bullet = True
     # else: bullet state already matches -- nothing to do. This is the F1
     # fix: an edited list item that was already bulleted keeps its
     # listId/nestingLevel because we never touch its bullet formatting.
 
-    target_indent = kind == "blockquote_line"
-    if target_indent and not prior_state["indent"]:
-        requests.append(
-            {
-                "updateParagraphStyle": {
-                    "range": rng,
-                    "paragraphStyle": {
-                        "indentFirstLine": {"magnitude": 0, "unit": "PT"},
-                        "indentStart": {"magnitude": 36, "unit": "PT"},
-                    },
-                    "fields": "indentFirstLine,indentStart",
+    if not target["bullet"]:
+        if target["indent"] and not prior_state["indent"]:
+            requests.append(
+                {
+                    "updateParagraphStyle": {
+                        "range": rng,
+                        "paragraphStyle": {
+                            "indentFirstLine": {"magnitude": 0, "unit": "PT"},
+                            "indentStart": {"magnitude": 36, "unit": "PT"},
+                        },
+                        "fields": "indentFirstLine,indentStart",
+                    }
                 }
-            }
-        )
-    elif not target_indent and prior_state["indent"]:
-        requests.append(
-            {
-                "updateParagraphStyle": {
-                    "range": rng,
-                    "paragraphStyle": {
-                        "indentFirstLine": {"magnitude": 0, "unit": "PT"},
-                        "indentStart": {"magnitude": 0, "unit": "PT"},
-                    },
-                    "fields": "indentFirstLine,indentStart",
+            )
+        elif not target["indent"] and (prior_state["indent"] or just_deleted_bullet):
+            requests.append(
+                {
+                    "updateParagraphStyle": {
+                        "range": rng,
+                        "paragraphStyle": {
+                            "indentFirstLine": {"magnitude": 0, "unit": "PT"},
+                            "indentStart": {"magnitude": 0, "unit": "PT"},
+                        },
+                        "fields": "indentFirstLine,indentStart",
+                    }
                 }
-            }
-        )
+            )
+    # target["bullet"] True: indent is the list's own, left untouched.
 
     return requests
 
@@ -379,6 +443,27 @@ def smart_update_doc(docs_service, doc_id, markdown_text, dry_run=False):
     operations.sort(key=lambda op: (op["doc_start"], op["seq"]), reverse=True)
 
     all_requests = []
+    # L1: a run of 2+ inserts built at the SAME doc_start (any insert of
+    # multiple paragraphs before one existing paragraph) applies as a
+    # stack -- operations.sort above put them in application order already
+    # (descending seq within a tied doc_start). The FIRST one applied in
+    # such a run really does land inside the original doc's neighbouring
+    # paragraph, so a fresh `_find_anchor_paragraph` lookup against the
+    # (unmodified-so-far) doc_paragraphs is correct for it. But every op
+    # applied AFTER that lands inside the paragraph the PREVIOUS op in the
+    # same run just wrote (its own insertText + style requests already sit
+    # earlier in this same batchUpdate, so by the time this op's requests
+    # run, that's genuinely what's there) -- not inside the original
+    # neighbour, which by then no longer touches this position at all.
+    # Anchoring every op in the run against the ORIGINAL doc_paragraphs
+    # (the pre-fix bug) makes every op after the first judge itself against
+    # a paragraph it doesn't actually land in: a style reset gets skipped
+    # or applied backwards, and createParagraphBullets fires on a
+    # paragraph function `style_requests_for_unit` itself already decided
+    # was bulleted one op ago, which is F1's exact re-bullet failure,
+    # applied to inserts instead of replaces.
+    chained_insert_start = None
+    chained_insert_state = None
     for op in operations:
         doc_start, doc_end, unit, is_insert = op["doc_start"], op["doc_end"], op["unit"], op["is_insert"]
 
@@ -409,13 +494,25 @@ def smart_update_doc(docs_service, doc_id, markdown_text, dry_run=False):
                 para_start, para_end = idx, new_idx
             if reqs:
                 all_requests.extend(reqs)
-                anchor = _find_anchor_paragraph(doc_paragraphs, idx)
-                prior_state = _paragraph_state(anchor)
+                if _chain_applies(chained_insert_start, doc_start):
+                    prior_state = chained_insert_state
+                else:
+                    anchor = _find_anchor_paragraph(doc_paragraphs, idx)
+                    prior_state = _paragraph_state(anchor)
                 all_requests.extend(
                     style_requests_for_unit(unit, para_start, para_end, target_tab_id, prior_state)
                 )
+                chained_insert_start = doc_start
+                chained_insert_state = _target_state_for_unit(unit)
+            continue
 
-        elif unit is None:
+        # A non-insert op breaks the chain -- the next insert (even one
+        # that happens to share a doc_start with a much earlier insert run)
+        # must not inherit stale chain state from an unrelated group.
+        chained_insert_start = None
+        chained_insert_state = None
+
+        if unit is None:
             # Pure deletion: remove the whole paragraph including its own
             # trailing newline, so no empty paragraph is left behind --
             # unless the next body element isn't itself a paragraph (a

@@ -55,6 +55,12 @@ class FakeDoc:
         # index 0 is an unaddressable placeholder (mirrors the real API:
         # index 0 is never a legal location).
         self.c = [[0x00A7, None]]
+        # Every applied updateTextStyle request, as (start, end, textStyle
+        # dict) -- lets a test assert WHICH span a style landed on, not
+        # just that some in-bounds updateTextStyle happened. Paired with
+        # `text_at`, a test can assert "the range that says bold=True
+        # covers exactly this substring".
+        self.text_style_events = []
         # A real Docs tab always has at least one paragraph, even empty --
         # there is no such thing as a body with zero paragraphs. Seed one
         # so an empty `paragraphs` list models a genuinely empty tab rather
@@ -141,9 +147,21 @@ class FakeDoc:
         elif kind == "updateTextStyle":
             s, e = v["range"]["startIndex"], v["range"]["endIndex"]
             assert 1 <= s < e <= self.end(), f"updateTextStyle oob {s},{e}"
+            # Snapshot the covered text NOW, at application time -- later
+            # requests in the same batch can still shift/rewrite content
+            # at these same numeric indices, so capturing the substring
+            # immediately is what makes text_style_events answer "which
+            # text did this style land on" rather than "what's at these
+            # indices by the time you look, afterward".
+            covered = self.units_at(s, e)
+            self.text_style_events.append((s, e, dict(v.get("textStyle", {})), covered))
 
         else:
             raise AssertionError(f"unhandled request kind: {kind}")
+
+    def units_at(self, start, end):
+        """The decoded text currently occupying [start, end)."""
+        return units_to_str([self.c[i][0] for i in range(start, end)])
 
     # -- introspection -----------------------------------------------------
 

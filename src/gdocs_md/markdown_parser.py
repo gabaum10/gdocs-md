@@ -111,7 +111,17 @@ def parse_inline(text):
 
 def strip_inline(text):
     """Strip inline markdown formatting markers from a text segment, for
-    plain-text diffing."""
+    plain-text diffing against a live doc.
+
+    `<br>` maps to `\\v` here -- the SAME vertical-tab character
+    `parse_inline` writes to the doc for a soft line break -- not a plain
+    space. A doc paragraph containing a `<br>` reads back with a literal
+    `\\v` in its text (see `extract_paragraphs_with_positions`); comparing
+    that against a plain-space rendering of the same markdown never
+    matched, so `smart_update_doc` treated a `<br>` paragraph as changed
+    on every single run (deleting and reinserting it, killing any comment
+    anchored there) even when nothing in it had actually changed.
+    """
     text = _BOLD_ITALIC_STAR_RE.sub(lambda m: m.group(1), text)
     text = _BOLD_ITALIC_UNDER_RE.sub(lambda m: m.group(1), text)
     text = _BOLD_STAR_RE.sub(lambda m: m.group(1), text)
@@ -120,7 +130,7 @@ def strip_inline(text):
     text = _ITALIC_UNDER_RE.sub(lambda m: m.group(1), text)
     text = _CODE_RE.sub(lambda m: m.group(1), text)
     text = text.replace("\\", "")
-    text = re.sub(r"<[Bb][Rr]>", " ", text)
+    text = re.sub(r"<[Bb][Rr]>", "\v", text)
     return text
 
 

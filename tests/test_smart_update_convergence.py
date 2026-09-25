@@ -73,3 +73,45 @@ def test_dry_run_computes_but_does_not_write():
     assert result["dry_run"] is True
     assert result["ops"] > 0
     assert doc.plain_texts() == before
+
+
+def test_br_paragraph_converges():
+    """L7: a <br> paragraph must reach 0 ops on a second identical run, not
+    get deleted and reinserted every time (which kills any comment
+    anchored there)."""
+    doc = FakeDoc([("a", None), ("old", None)])
+    md = "a\n\nline one<br>line two\n"
+    first, second = _run_twice(doc, md)
+    assert first["ops"] > 0
+    assert second["changed"] == 0
+    assert second["ops"] == 0
+    assert doc.plain_texts()[1] == "line one\x0bline two"
+
+
+def test_positive_control_br_as_space_would_never_converge(monkeypatch):
+    """Revert the fix (map <br> to a plain space instead of \\v, matching
+    what parse_inline actually writes) and confirm the SAME paragraph
+    then never converges -- proving the mapping mismatch, not something
+    else, was the cause."""
+    import re as re_module
+
+    from gdocs_md import markdown_parser
+
+    def buggy_strip_inline(text):
+        text = markdown_parser._BOLD_ITALIC_STAR_RE.sub(lambda m: m.group(1), text)
+        text = markdown_parser._BOLD_ITALIC_UNDER_RE.sub(lambda m: m.group(1), text)
+        text = markdown_parser._BOLD_STAR_RE.sub(lambda m: m.group(1), text)
+        text = markdown_parser._BOLD_UNDER_RE.sub(lambda m: m.group(1), text)
+        text = markdown_parser._ITALIC_STAR_RE.sub(lambda m: m.group(1), text)
+        text = markdown_parser._ITALIC_UNDER_RE.sub(lambda m: m.group(1), text)
+        text = markdown_parser._CODE_RE.sub(lambda m: m.group(1), text)
+        text = text.replace("\\", "")
+        text = re_module.sub(r"<[Bb][Rr]>", " ", text)  # pre-fix mapping
+        return text
+
+    monkeypatch.setattr(markdown_parser, "strip_inline", buggy_strip_inline)
+
+    doc = FakeDoc([("a", None), ("old", None)])
+    md = "a\n\nline one<br>line two\n"
+    first, second = _run_twice(doc, md)
+    assert second["changed"] != 0  # never converges under the buggy mapping

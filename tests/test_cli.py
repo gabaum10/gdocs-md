@@ -5,8 +5,6 @@ local-only."""
 
 import json
 
-import pytest
-
 from gdocs_md import cli, exit_codes
 
 
@@ -15,10 +13,53 @@ def test_no_subcommand_exits_usage(capsys):
     assert code == exit_codes.USAGE
 
 
-def test_unknown_subcommand_exits_usage_via_argparse():
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["not-a-real-command"])
-    assert exc.value.code == 2
+def test_unknown_subcommand_exits_usage_gracefully(capsys):
+    # argparse errors route through UsageError now (cli._ArgumentParser),
+    # not a raw SystemExit -- main() returns the code like any other error
+    # path, and the message is on stderr as plain text (or JSON under
+    # --json; see test_argparse_error_is_json_under_json_flag).
+    code = cli.main(["not-a-real-command"])
+    assert code == exit_codes.USAGE
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_argparse_error_is_json_under_json_flag(capsys):
+    code = cli.main(["not-a-real-command", "--json"])
+    assert code == exit_codes.USAGE
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["exit_code"] == exit_codes.USAGE
+
+
+def test_bare_auth_exits_usage(capsys):
+    code = cli.main(["auth"])
+    assert code == exit_codes.USAGE
+    assert "subcommand" in capsys.readouterr().err.lower()
+
+
+def test_global_flags_work_before_subcommand(tmp_path, capsys):
+    code = cli.main(["--credentials-dir", str(tmp_path), "--account", "x", "list", "--json"])
+    assert code == exit_codes.OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"registry": {}}
+
+
+def test_global_flags_work_after_subcommand(tmp_path, capsys):
+    code = cli.main(["list", "--credentials-dir", str(tmp_path), "--account", "x", "--json"])
+    assert code == exit_codes.OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"registry": {}}
+
+
+def test_before_subcommand_flag_wins_when_not_repeated_after(tmp_path, capsys):
+    # --account before the subcommand must survive even though the `get`
+    # subparser ALSO declares --account (for the after-subcommand form) --
+    # its own unset default must not clobber the value the top-level
+    # parser already captured. Missing account would be exit 3; this
+    # instead fails later, on the missing doc id, proving --account X did
+    # take effect.
+    code = cli.main(["--account", "x", "--credentials-dir", str(tmp_path), "get"])
+    assert code == exit_codes.USAGE
+    assert "No account specified" not in capsys.readouterr().err
 
 
 def test_list_on_empty_registry_exits_ok(tmp_path, capsys):
@@ -94,10 +135,11 @@ def test_create_missing_file_exits_not_found(tmp_path, capsys):
     assert code == exit_codes.NOT_FOUND_OR_PERMISSION
 
 
-def test_update_replace_all_multi_tab_requires_force_is_a_config_error_not_a_crash(tmp_path):
-    # Without network this can't reach the multi-tab check itself, but it
-    # must not reach it before failing on the missing input file -- this
-    # pins the argument-validation order (usage-shaped failures happen
-    # before any network call).
+def test_update_missing_file_arg_exits_usage_not_auth_or_config(tmp_path):
+    # `update <doc-id>` with no <file-path> and no --tab is a usage error
+    # (a missing required argument), not an auth/config one -- this is the
+    # exact drift a prior review found: it used to exit 3. Named for what it
+    # actually checks (the previous name claimed to cover the multi-tab
+    # --force guard, which this can't reach without a network call at all).
     code = cli.main(["--credentials-dir", str(tmp_path), "update", "doc-id", "--account", "x"])
-    assert code == exit_codes.AUTH_OR_CONFIG
+    assert code == exit_codes.USAGE

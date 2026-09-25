@@ -72,8 +72,15 @@ def test_new_list_item_still_gets_bulleted():
     smart_update_doc(FakeService(doc), "doc-x", "intro\n\n- first item\n")
     paras = doc.paras()
     new_item = [p for p in paras if p[0] == "first item"][0]
+    # nestingLevel isn't asserted here: the fake hardcodes 0 on every
+    # freshly-minted bullet (createParagraphBullets always mints top-level
+    # -- there's no nested-creation path to test), so asserting that value
+    # back would prove nothing about the code under test. What DOES matter,
+    # and is real: a genuinely new list item still gets bulleted at all
+    # (createParagraphBullets fires, unlike F1's already-bulleted case),
+    # and gets its own distinct listId.
     assert new_item[1]["bullet"] is not None
-    assert new_item[1]["bullet"]["nestingLevel"] == 0
+    assert new_item[1]["bullet"]["listId"]
 
 
 # ---------------------------------------------------------------------------
@@ -127,15 +134,24 @@ class _AssertingService:
         return self._doc
 
     def batchUpdate(self, documentId=None, body=None):
-        for req in body["requests"]:
-            if "deleteContentRange" in req:
-                rng = req["deleteContentRange"]["range"]
-                assert rng["endIndex"] <= self._table_start, (
-                    f"deleteContentRange {rng} reaches into/through the table "
-                    f"starting at {self._table_start} -- the real API rejects "
-                    "deleting the newline immediately before a table without "
-                    "deleting the table itself."
-                )
+        deletes = [r for r in body["requests"] if "deleteContentRange" in r]
+        for req in deletes:
+            rng = req["deleteContentRange"]["range"]
+            # STRICTLY less than table_start: the table's own start index
+            # IS the position of the newline immediately preceding it
+            # (endIndex==table_start would delete through that newline,
+            # not just up to it). L4: the original guard here used <=,
+            # which a delete of exactly [doc_start, table_start) --
+            # endIndex == table_start -- still satisfies, so the guard
+            # never actually caught the unfixed F2 behavior; see
+            # test_f2_guard_catches_the_unfixed_behavior below.
+            assert rng["endIndex"] < self._table_start, (
+                f"deleteContentRange {rng} reaches into/through the table "
+                f"starting at {self._table_start} -- the real API rejects "
+                "deleting the newline immediately before a table without "
+                "deleting the table itself."
+            )
+        self.deletes_seen = getattr(self, "deletes_seen", 0) + len(deletes)
         self._last_body = body
         return self
 
@@ -167,6 +183,26 @@ def test_delete_before_table_falls_back_to_content_only():
     }
     svc = _AssertingService(doc, table_start=14)
     smart_update_doc(svc, "doc-x", "keep\n")
+    assert svc.deletes_seen == 1  # the fallback actually ran, not a no-op
+
+
+def test_f2_guard_catches_the_unfixed_behavior():
+    """Positive control for the F2 test above: reproduce the pre-F2
+    request shape directly (deleting through the table-adjacent newline,
+    range endIndex == table_start) and confirm _AssertingService's guard
+    rejects it -- the guard itself is real, not a tautology that would
+    also have passed the original bug (L4)."""
+    doc = FakeDoc([("x", None)])  # unused; only batchUpdate is exercised
+    svc = _AssertingService(doc, table_start=14)
+    try:
+        svc.batchUpdate(
+            documentId="x",
+            body={"requests": [{"deleteContentRange": {"range": {"startIndex": 6, "endIndex": 14}}}]},
+        )
+        raised = False
+    except AssertionError:
+        raised = True
+    assert raised
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +234,11 @@ def test_replacing_a_blockquote_line_with_plain_text_resets_indent():
     assert paras[0][1]["indent"] is False
 
 
-def test_inserting_a_heading_before_a_normal_paragraph_does_not_bleed_style():
+def test_inserting_a_normal_paragraph_before_a_heading_does_not_inherit_its_style():
+    # Name matches what this actually inserts: a plain paragraph ("added")
+    # immediately before an existing HEADING_2 ("Sec"). This is a SINGLE
+    # insert, so it can't exercise L1 (stacked inserts at the same
+    # position) -- that's covered separately in test_smart_update_l1.py.
     doc = FakeDoc([("Intro", None), ("Sec", {"style": "HEADING_2"}), ("x", None)])
     smart_update_doc(FakeService(doc), "doc-x", "Intro\n\nadded\n\n## Sec\n\nx\n")
     paras = doc.paras()

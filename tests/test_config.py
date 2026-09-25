@@ -94,3 +94,23 @@ def test_token_path_is_under_credentials_dir(tmp_path):
     args = Args(config_file=None, credentials_dir=str(tmp_path), oauth_client_file=None, registry_file=None, account=None)
     config = resolve_config(args)
     assert config.token_path("personal") == tmp_path / "personal" / "token.json"
+
+
+def test_unknown_config_key_warns(tmp_path, capsys):
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps({"credential_dir": "/typo"}))  # missing the 's'
+    args = Args(config_file=str(config_file), credentials_dir=None, oauth_client_file=None, registry_file=None, account=None)
+    config = resolve_config(args)
+    err = capsys.readouterr().err
+    assert "credential_dir" in err
+    assert "unrecognized" in err.lower()
+    # And it fell back to the default rather than silently adopting the typo.
+    assert config.credentials_dir != Path("/typo")
+
+
+def test_known_config_keys_do_not_warn(tmp_path, capsys):
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps({"default_account": "x", "credentials_dir": str(tmp_path)}))
+    args = Args(config_file=str(config_file), credentials_dir=None, oauth_client_file=None, registry_file=None, account=None)
+    resolve_config(args)
+    assert capsys.readouterr().err == ""

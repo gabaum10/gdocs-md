@@ -13,17 +13,44 @@ codes, JSON shapes, and known limits. There's also a drop-in skill file at
 
 ## Install
 
-Requires Python 3.10+ and [pandoc](https://pandoc.org/installing.html) (used
-to convert markdown to DOCX for `create` and `update --replace-all`).
+Requires Python 3.10+ and [pandoc](https://pandoc.org/installing.html) >=
+2.11.2 (used to convert markdown to DOCX for `create` and
+`update --replace-all`; `gdocs-md` checks the version and fails loudly,
+naming the minimum, if it's older).
+
+This package is **not published to PyPI** -- `uv tool install gdocs-md`
+does not work (the name is unclaimed there; don't run that line, it would
+install whatever anyone else eventually registers under it). Install from
+git, pinned to a release tag:
 
 ```sh
-uv tool install gdocs-md
-# or, from a local checkout / git URL:
-uv tool install /path/to/gdocs-md
-uv tool install git+https://github.com/gabaum10/gdocs-md
+uv tool install git+https://github.com/gabaum10/gdocs-md@v0.1.0
 ```
 
-This installs the `gdocs-md` console command.
+Or from a local checkout:
+
+```sh
+uv tool install /path/to/gdocs-md
+```
+
+Both install the `gdocs-md` console command.
+
+**The repo is currently private.** A git install needs you to be a
+collaborator with git credentials configured for `github.com` (SSH key or
+a credential helper) -- an anonymous `https://` clone will fail. If you
+got a Release notification or a link to this repo, that access should
+already be set up; if `git+https://...` fails with an auth error, that's
+the first thing to check.
+
+**Upgrading:** re-run the install command with the new tag --
+`uv tool install git+https://github.com/gabaum10/gdocs-md@v0.2.0` (no
+`--force`/`--reinstall` needed; installing a different pinned ref is
+already a different requirement as far as uv is concerned). Plain
+`uv tool upgrade gdocs-md` does **not** move to a new release when you
+installed pinned to a specific tag -- verified: it reports "Nothing to
+upgrade", because the tag itself (and therefore the ref you're pinned to)
+hasn't changed. `uv tool upgrade` only helps if you installed without a
+tag (tracking a branch), which isn't what the command above does.
 
 ## Quickstart
 

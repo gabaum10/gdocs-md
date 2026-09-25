@@ -6,12 +6,13 @@ purpose -- it's the "just replace it" mode for a single tab."""
 from __future__ import annotations
 
 from . import docs_api
+from .errors import NotFoundOrPermissionError
 from .markdown_parser import build_block_requests, build_text_run_requests, parse_inline, parse_markdown_blocks
 
 
 def find_table_in_tab(docs_service, doc_id, tab_id, table_index):
     """Find the Nth table element in the tab (0-based). Returns
-    (table_element, tab_body_content) or raises ValueError."""
+    (table_element, tab_body_content) or raises NotFoundOrPermissionError."""
     doc = docs_service.documents().get(documentId=doc_id, includeTabsContent=True).execute()
 
     for tab in doc.get("tabs", []):
@@ -24,12 +25,12 @@ def find_table_in_tab(docs_service, doc_id, tab_id, table_index):
                     if table_count == table_index:
                         return elem["table"], content
                     table_count += 1
-            raise ValueError(
+            raise NotFoundOrPermissionError(
                 f"Table index {table_index} not found in tab '{tab_id}' "
                 f"(found {table_count} tables)"
             )
 
-    raise ValueError(f"Tab '{tab_id}' not found")
+    raise NotFoundOrPermissionError(f"Tab '{tab_id}' not found")
 
 
 def fill_table_cells(docs_service, doc_id, tab_id, table_elem, block):
