@@ -1,0 +1,40 @@
+[project]
+name = "gdocs-md"
+version = "0.1.0"
+description = "Markdown-driven CLI for Google Docs: read, create, and diff-update docs from markdown, built for humans and AI agents alike."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = [
+    "google-auth>=2.29",
+    "google-auth-oauthlib>=1.2",
+    "google-api-python-client>=2.126",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Topic :: Text Processing :: Markup :: Markdown",
+]
+
+[project.urls]
+Homepage = "https://github.com/gabaum10/gdocs-md"
+Repository = "https://github.com/gabaum10/gdocs-md"
+Changelog = "https://github.com/gabaum10/gdocs-md/blob/main/CHANGELOG.md"
+
+[project.scripts]
+gdocs-md = "gdocs_md.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.15,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
