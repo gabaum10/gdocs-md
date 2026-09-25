@@ -76,7 +76,7 @@ def test_dry_run_computes_but_does_not_write():
 
 
 def test_br_paragraph_converges():
-    """L7: a <br> paragraph must reach 0 ops on a second identical run, not
+    """A <br> paragraph must reach 0 ops on a second identical run, not
     get deleted and reinserted every time (which kills any comment
     anchored there)."""
     doc = FakeDoc([("a", None), ("old", None)])

@@ -1,6 +1,6 @@
-"""auth.py: expiry loading/proactive refresh (W12), the unwritable-token
-best-effort persist (W12), and atomic/0600-from-creation token writes
-(W14). No live Google calls -- refresh itself is monkeypatched onto
+"""auth.py: expiry loading/proactive refresh, the unwritable-token
+best-effort persist, and atomic/0600-from-creation token writes.
+No live Google calls -- refresh itself is monkeypatched onto
 Credentials.refresh."""
 
 import json

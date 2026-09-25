@@ -24,7 +24,7 @@ install whatever anyone else eventually registers under it). Install from
 git, pinned to a release tag:
 
 ```sh
-uv tool install git+https://github.com/gabaum10/gdocs-md@v0.1.0
+uv tool install git+https://github.com/gabaum10/gdocs-md@v0.1.1
 ```
 
 Or from a local checkout:
@@ -33,14 +33,14 @@ Or from a local checkout:
 uv tool install /path/to/gdocs-md
 ```
 
-Both install the `gdocs-md` console command.
+Both install the `gdocs-md` console command. The repo is public, so a
+plain `https://` clone or `git+https://` install works with no
+credentials or collaborator access needed.
 
-**The repo is currently private.** A git install needs you to be a
-collaborator with git credentials configured for `github.com` (SSH key or
-a credential helper) -- an anonymous `https://` clone will fail. If you
-got a Release notification or a link to this repo, that access should
-already be set up; if `git+https://...` fails with an auth error, that's
-the first thing to check.
+**`uv tool` installs to `~/.local/bin`**, which may not be on your
+`PATH`. If `gdocs-md` isn't found after install, run
+`uv tool update-shell` (adds it for future shells) or add it directly:
+`export PATH="$HOME/.local/bin:$PATH"`.
 
 **Upgrading:** re-run the install command with the new tag --
 `uv tool install git+https://github.com/gabaum10/gdocs-md@v0.2.0` (no
@@ -50,7 +50,13 @@ already a different requirement as far as uv is concerned). Plain
 installed pinned to a specific tag -- verified: it reports "Nothing to
 upgrade", because the tag itself (and therefore the ref you're pinned to)
 hasn't changed. `uv tool upgrade` only helps if you installed without a
-tag (tracking a branch), which isn't what the command above does.
+tag (tracking a branch), which isn't what the command above does. Both
+of these are real, verified behaviors of `uv tool` -- pick the one that
+matches how you installed.
+
+**Hearing about new releases:** watch the no-account Atom feed
+(`https://github.com/gabaum10/gdocs-md/releases.atom`) or, if you have a
+GitHub account, use Watch -> Custom -> Releases on the repo.
 
 ## Quickstart
 
@@ -117,11 +123,12 @@ There is no baked-in account name or default. A fresh install has nothing
 until you run `gdocs-md auth login --account <name>` (or set
 `default_account`).
 
-**Flag ordering matters.** `--config-file`, `--credentials-dir`,
-`--oauth-client`, and `--registry` are top-level flags and must come
-BEFORE the subcommand: `gdocs-md --credentials-dir DIR list`. `--account`
-and `--json` are per-subcommand flags and go AFTER it: `gdocs-md list
---json`.
+**Flag ordering.** Every global flag -- `--config-file`,
+`--credentials-dir`, `--oauth-client`, `--registry`, `--account`, and
+`--json` -- works in EITHER position: before the subcommand
+(`gdocs-md --credentials-dir DIR list`) or after it
+(`gdocs-md list --credentials-dir DIR`). Both forms are equivalent; use
+whichever reads better for the call you're building.
 
 ## Commands
 

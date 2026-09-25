@@ -15,30 +15,29 @@ Algorithm:
 5. Sort all operations in reverse document order and build batchUpdate
    requests.
 
-Three fixes live in here that go beyond "just make the diff work":
+Three behaviors live in here that go beyond "just make the diff work":
 
-F1 (bullet identity): a replace or insert that lands on/next-to an
+Bullet-identity preservation: a replace or insert that lands on/next-to an
 already-bulleted paragraph does NOT call createParagraphBullets on it. The
 paragraph mark that carries listId/nestingLevel is never deleted by a
 replace (only the text before it), so leaving its bullet formatting alone
 is what preserves list identity and nesting through an edit. See
 `style_requests_for_unit`.
 
-F2 (delete-before-structural-element): a pure paragraph deletion only
-removes the paragraph's own trailing newline (the full range that lets the
-next paragraph merge upward) when the next body element is itself a
-paragraph. DeleteContentRangeRequest rejects deleting the newline
-immediately before a table/TOC/section-break without deleting that element
-too; falling back to content-only deletion (leaving an empty paragraph)
-keeps the whole batchUpdate from failing atomically on docs with those
-elements.
+Structural-delete fallback: a pure paragraph deletion only removes the
+paragraph's own trailing newline (the full range that lets the next
+paragraph merge upward) when the next body element is itself a paragraph.
+DeleteContentRangeRequest rejects deleting the newline immediately before
+a table/TOC/section-break without deleting that element too; falling back
+to content-only deletion (leaving an empty paragraph) keeps the whole
+batchUpdate from failing atomically on docs with those elements.
 
-F3 (style/bullet/indent reset, both directions): `style_requests_for_unit`
-compares the unit's target state against the *anchor* paragraph's (insert)
-or the *replaced* paragraph's (replace) state and emits a reset any time
-they differ -- not just when the target has an explicit non-default style.
-Previously this only worked when moving *into* a non-NORMAL_TEXT/bulleted/
-indented state; moving *out* of one silently kept the old formatting.
+Bidirectional style reset: `style_requests_for_unit` compares the unit's
+target state against the *anchor* paragraph's (insert) or the *replaced*
+paragraph's (replace) state and emits a reset any time they differ -- not
+just when the target has an explicit non-default style. Previously this
+only worked when moving *into* a non-NORMAL_TEXT/bulleted/indented state;
+moving *out* of one silently kept the old formatting.
 """
 
 from __future__ import annotations
@@ -126,12 +125,13 @@ def _find_anchor_paragraph(doc_paragraphs, position):
     followed by a '\\n', splitting it in two) -- both inherit that
     paragraph's current style, not the style of whatever precedes it.
 
-    Getting this wrong is exactly F3's mid-doc case: inserting a plain
-    paragraph immediately before an existing HEADING_2 lands INSIDE that
-    heading's paragraph until the new '\\n' is written, so its anchor is
-    the heading, not whatever paragraph came before it -- treating the
-    *previous* paragraph as the anchor skips the needed style reset and
-    the new paragraph reads back with the heading's style.
+    Getting this wrong is exactly the bidirectional style reset's mid-doc
+    case: inserting a plain paragraph immediately before an existing
+    HEADING_2 lands INSIDE that heading's paragraph until the new '\\n' is
+    written, so its anchor is the heading, not whatever paragraph came
+    before it -- treating the *previous* paragraph as the anchor skips the
+    needed style reset and the new paragraph reads back with the heading's
+    style.
     """
     for para in doc_paragraphs:
         if para["end"] > position:
@@ -144,10 +144,11 @@ def _chain_applies(previous_insert_start, current_insert_start):
     TARGET state of the previously-APPLIED insert op, instead of a fresh
     `_find_anchor_paragraph` lookup against the original (pre-batch) doc --
     true exactly when the two share the same doc_start, i.e. they're part
-    of the same same-position stacked-insert run (L1). Factored out as its
-    own function so a test can monkeypatch it to always return False and
-    demonstrate that the L1 regression tests actually depend on this
-    chaining -- see test_smart_update_l1.py's positive control.
+    of the same same-position stacked-insert run. Factored out as its own
+    function so a test can monkeypatch it to always return False and
+    demonstrate that the stacked-insert regression tests actually depend
+    on this chaining -- see test_smart_update_stacked_inserts.py's
+    positive control.
     """
     return previous_insert_start is not None and previous_insert_start == current_insert_start
 
@@ -194,12 +195,13 @@ def style_requests_for_unit(unit, para_start, para_end, target_tab_id, prior_sta
     paragraph's state (replace), as returned by `_paragraph_state` (or, for
     a chained stacked insert, `_target_state_for_unit` of the op applied
     just before this one). Emits a request only when the target state
-    differs from it -- this is both F1 (skip createParagraphBullets, and
-    therefore preserve listId/nestingLevel, when the paragraph is already
-    bulleted the way we want) and F3 (emit the reset when moving OUT of a
+    differs from it -- this is both bullet-identity preservation (skip
+    createParagraphBullets, and therefore preserve listId/nestingLevel,
+    when the paragraph is already bulleted the way we want) and the
+    bidirectional style reset (emit the reset when moving OUT of a
     style/bullet/indent, not just into one).
 
-    Indent and bullet are NOT independent (L2): the Docs API reports list
+    Indent and bullet are NOT independent: the Docs API reports list
     indentation through the same `indentStart`/`indentFirstLine` fields
     this tool uses for its own blockquote convention, so:
       - indent is never touched when the TARGET is a list_item -- list
@@ -245,9 +247,10 @@ def style_requests_for_unit(unit, para_start, para_end, target_tab_id, prior_sta
     elif not target["bullet"] and prior_state["bullet"]:
         requests.append({"deleteParagraphBullets": {"range": rng}})
         just_deleted_bullet = True
-    # else: bullet state already matches -- nothing to do. This is the F1
-    # fix: an edited list item that was already bulleted keeps its
-    # listId/nestingLevel because we never touch its bullet formatting.
+    # else: bullet state already matches -- nothing to do. This is
+    # bullet-identity preservation: an edited list item that was already
+    # bulleted keeps its listId/nestingLevel because we never touch its
+    # bullet formatting.
 
     if not target["bullet"]:
         if target["indent"] and not prior_state["indent"]:
@@ -443,8 +446,9 @@ def smart_update_doc(docs_service, doc_id, markdown_text, dry_run=False):
     operations.sort(key=lambda op: (op["doc_start"], op["seq"]), reverse=True)
 
     all_requests = []
-    # L1: a run of 2+ inserts built at the SAME doc_start (any insert of
-    # multiple paragraphs before one existing paragraph) applies as a
+    # Stacked-insert chaining: a run of 2+ inserts built at the SAME
+    # doc_start (any insert of multiple paragraphs before one existing
+    # paragraph) applies as a
     # stack -- operations.sort above put them in application order already
     # (descending seq within a tied doc_start). The FIRST one applied in
     # such a run really does land inside the original doc's neighbouring
@@ -460,8 +464,8 @@ def smart_update_doc(docs_service, doc_id, markdown_text, dry_run=False):
     # a paragraph it doesn't actually land in: a style reset gets skipped
     # or applied backwards, and createParagraphBullets fires on a
     # paragraph function `style_requests_for_unit` itself already decided
-    # was bulleted one op ago, which is F1's exact re-bullet failure,
-    # applied to inserts instead of replaces.
+    # was bulleted one op ago, which is bullet-identity preservation's
+    # exact re-bullet failure, applied to inserts instead of replaces.
     chained_insert_start = None
     chained_insert_state = None
     for op in operations:

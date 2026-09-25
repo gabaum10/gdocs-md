@@ -1,18 +1,18 @@
-"""Three fixes to the diff-based (smart) update path, referred to elsewhere
-in this codebase by the finding numbers from the review that caught them:
-F1, F2, F3.
+"""Three behaviors of the diff-based (smart) update path:
 
-F1 (blocks): editing an existing list item must not re-bullet it -- doing
-so mints a new list and can flatten nesting on a real doc. Preserving
-listId/nestingLevel means never calling createParagraphBullets on a
-paragraph that's already bulleted.
+Bullet-identity preservation: editing an existing list item must not
+re-bullet it -- doing so mints a new list and can flatten nesting on a
+real doc. Preserving listId/nestingLevel means never calling
+createParagraphBullets on a paragraph that's already bulleted.
 
-F2: a pure-paragraph delete whose next body element isn't itself a
-paragraph (a table/TOC/section-break) must not try to delete through that
-paragraph's own trailing newline -- DeleteContentRangeRequest rejects that.
+Structural-delete fallback: a pure-paragraph delete whose next body
+element isn't itself a paragraph (a table/TOC/section-break) must not try
+to delete through that paragraph's own trailing newline --
+DeleteContentRangeRequest rejects that.
 
-F3: style/bullet/indent resets must fire in BOTH directions -- moving into
-a style and moving out of one -- not just the "into" direction.
+Bidirectional style reset: style/bullet/indent resets must fire in BOTH
+directions -- moving into a style and moving out of one -- not just the
+"into" direction.
 """
 
 from fake_docs_service import FakeDoc, FakeService
@@ -26,7 +26,7 @@ from gdocs_md.smart_update import (
 
 
 # ---------------------------------------------------------------------------
-# F1: bullet identity survives an edit.
+# Bullet identity survives an edit.
 # ---------------------------------------------------------------------------
 
 
@@ -77,14 +77,14 @@ def test_new_list_item_still_gets_bulleted():
     # -- there's no nested-creation path to test), so asserting that value
     # back would prove nothing about the code under test. What DOES matter,
     # and is real: a genuinely new list item still gets bulleted at all
-    # (createParagraphBullets fires, unlike F1's already-bulleted case),
+    # (createParagraphBullets fires, unlike the already-bulleted case),
     # and gets its own distinct listId.
     assert new_item[1]["bullet"] is not None
     assert new_item[1]["bullet"]["listId"]
 
 
 # ---------------------------------------------------------------------------
-# F2: delete adjacency to a non-paragraph element.
+# Delete adjacency to a non-paragraph element.
 # ---------------------------------------------------------------------------
 
 
@@ -140,11 +140,13 @@ class _AssertingService:
             # STRICTLY less than table_start: the table's own start index
             # IS the position of the newline immediately preceding it
             # (endIndex==table_start would delete through that newline,
-            # not just up to it). L4: the original guard here used <=,
+            # not just up to it). The original guard here used <=,
             # which a delete of exactly [doc_start, table_start) --
             # endIndex == table_start -- still satisfies, so the guard
-            # never actually caught the unfixed F2 behavior; see
-            # test_f2_guard_catches_the_unfixed_behavior below.
+            # never actually caught the unfixed structural-delete-fallback
+            # behavior; see
+            # test_structural_delete_guard_catches_the_unfixed_behavior
+            # below.
             assert rng["endIndex"] < self._table_start, (
                 f"deleteContentRange {rng} reaches into/through the table "
                 f"starting at {self._table_start} -- the real API rejects "
@@ -186,12 +188,13 @@ def test_delete_before_table_falls_back_to_content_only():
     assert svc.deletes_seen == 1  # the fallback actually ran, not a no-op
 
 
-def test_f2_guard_catches_the_unfixed_behavior():
-    """Positive control for the F2 test above: reproduce the pre-F2
-    request shape directly (deleting through the table-adjacent newline,
-    range endIndex == table_start) and confirm _AssertingService's guard
-    rejects it -- the guard itself is real, not a tautology that would
-    also have passed the original bug (L4)."""
+def test_structural_delete_guard_catches_the_unfixed_behavior():
+    """Positive control for the structural-delete-fallback test above:
+    reproduce the pre-fix request shape directly (deleting through the
+    table-adjacent newline, range endIndex == table_start) and confirm
+    _AssertingService's guard rejects it -- the guard itself is real, not
+    a tautology that would also have passed the original off-by-one
+    bug."""
     doc = FakeDoc([("x", None)])  # unused; only batchUpdate is exercised
     svc = _AssertingService(doc, table_start=14)
     try:
@@ -206,7 +209,7 @@ def test_f2_guard_catches_the_unfixed_behavior():
 
 
 # ---------------------------------------------------------------------------
-# F3: style/bullet/indent resets fire in both directions.
+# Style/bullet/indent resets fire in both directions.
 # ---------------------------------------------------------------------------
 
 
@@ -237,8 +240,9 @@ def test_replacing_a_blockquote_line_with_plain_text_resets_indent():
 def test_inserting_a_normal_paragraph_before_a_heading_does_not_inherit_its_style():
     # Name matches what this actually inserts: a plain paragraph ("added")
     # immediately before an existing HEADING_2 ("Sec"). This is a SINGLE
-    # insert, so it can't exercise L1 (stacked inserts at the same
-    # position) -- that's covered separately in test_smart_update_l1.py.
+    # insert, so it can't exercise stacked-insert chaining (stacked inserts
+    # at the same position) -- that's covered separately in
+    # test_smart_update_stacked_inserts.py.
     doc = FakeDoc([("Intro", None), ("Sec", {"style": "HEADING_2"}), ("x", None)])
     smart_update_doc(FakeService(doc), "doc-x", "Intro\n\nadded\n\n## Sec\n\nx\n")
     paras = doc.paras()

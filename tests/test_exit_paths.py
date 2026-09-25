@@ -1,7 +1,7 @@
 """Exercise the remaining exit-code-bearing error paths that don't need a
 live Google API: UNREPRESENTABLE_DIFF (multi-tab smart update),
-MISSING_PANDOC (pandoc absent from PATH), and the fix-round exit-code
-contract fixes (L3/W1/W2/W3): HttpError/RefreshError classification, a
+MISSING_PANDOC (pandoc absent from PATH), and the exit-code contract's
+error-handling fixes: HttpError/RefreshError classification, a
 `get -o` failure never truncating the target file, and every GdocsMdError
 propagating out of `get` untouched instead of being relabeled 4."""
 
@@ -238,7 +238,7 @@ def test_get_json_output_writes_json_to_file_not_stdout(tmp_path, monkeypatch, c
 
 
 def test_create_does_not_leak_temp_docx_when_auth_fails(tmp_path, monkeypatch):
-    """W19: convert-to-docx must not run before auth -- an auth failure
+    """convert-to-docx must not run before auth -- an auth failure
     with no drive_service ever obtained should leave no temp docx behind
     in the system temp directory."""
     import glob
@@ -259,7 +259,7 @@ def test_create_does_not_leak_temp_docx_when_auth_fails(tmp_path, monkeypatch):
 
 
 def test_create_reports_doc_id_when_registry_save_fails(tmp_path, monkeypatch, capsys):
-    """W10: a registry-save failure after the remote doc was already
+    """A registry-save failure after the remote doc was already
     created must not swallow the doc_id/url or exit non-zero -- that's
     what pushes a caller to retry `create` (which the duplicate check
     can't catch, since nothing got registered) and make a second doc."""

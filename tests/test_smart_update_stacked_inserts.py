@@ -1,4 +1,4 @@
-"""L1: stacked inserts at the same document position must each judge
+"""Stacked inserts at the same document position must each judge
 their own style/bullet decision against where they ACTUALLY land (inside
 the paragraph the previous insert in the same run just wrote), not against
 the original doc's neighbour paragraph, which by the second insert in the
@@ -60,10 +60,11 @@ def test_stacked_paragraph_and_heading_before_a_plain_paragraph():
 def test_three_item_list_inserted_between_two_plain_paragraphs_joins_one_list():
     """The regression oracle here is FakeDoc.apply itself: it raises if
     createParagraphBullets is ever called on an already-bulleted paragraph
-    (F1's exact failure, reproduced on the insert side by L1 -- the second
-    and third list items in the stack land inside the first item's
-    freshly-written paragraph, which style_requests_for_unit had ALREADY
-    decided was bulleted one op ago)."""
+    (bullet-identity preservation's exact failure, reproduced on the
+    insert side by stacked-insert chaining -- the second and third list
+    items in the stack land inside the first item's freshly-written
+    paragraph, which style_requests_for_unit had ALREADY decided was
+    bulleted one op ago)."""
     doc = FakeDoc([("Intro", None), ("Tail", None)])
     md = "Intro\n\n- one\n- two\n- three\n\nTail\n"
     smart_update_doc(FakeService(doc), "doc-x", md)  # must not raise
@@ -87,7 +88,8 @@ def test_clamped_stacked_append_at_doc_end_is_unaffected():
     """A clamped run (appending past the doc's own last
     paragraph) splits that SAME last paragraph for every op in the run --
     there's no "previous op's freshly-written paragraph" to land inside,
-    so this path was already correct before the L1 fix and must stay so."""
+    so this path was already correct before the stacked-insert chaining
+    fix and must stay so."""
     doc = FakeDoc([("Title", {"style": "HEADING_1"}), ("Body", None)])
     md = "# Title\n\nBody\n\nA\n\nB\n\nC\n"
     smart_update_doc(FakeService(doc), "doc-x", md)
@@ -97,8 +99,8 @@ def test_clamped_stacked_append_at_doc_end_is_unaffected():
     assert doc.plain_texts() == ["Title", "Body", "A", "B", "C"]
 
 
-def test_positive_control_disabling_the_chain_reproduces_l1(monkeypatch):
-    """Disable the L1 chaining decision (force it to always take the
+def test_positive_control_disabling_the_chain_reproduces_the_bug(monkeypatch):
+    """Disable the stacked-insert chaining decision (force it to always take the
     fresh-anchor path, the pre-fix behavior) and confirm the stacked-insert
     case then reads back the WRONG style -- proving the tests above
     actually depend on `_chain_applies`, not on some other accidental

@@ -117,7 +117,7 @@ def resolve_config(cli_args=None) -> Config:
     if unknown_keys:
         # A typo'd key (credential_dir instead of credentials_dir) would
         # otherwise silently fall back to the default with no signal at
-        # all -- W18.
+        # all.
         print(
             f"[Warning] {config_file_path}: unrecognized config key(s): "
             f"{', '.join(sorted(unknown_keys))} (ignored; known keys: "

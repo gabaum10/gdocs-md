@@ -149,7 +149,7 @@ def cmd_auth_status(args, config):
 def cmd_get(args, config):
     """Read a Google Doc.
 
-    Output ordering (W3/L6 fix): nothing is written to `--output FILE`
+    Output ordering: nothing is written to `--output FILE`
     (or stdout) until every fetch has succeeded. All text is buffered in
     memory and written ONCE, at the very end, atomically (temp file +
     rename) when `--output` is given -- a failed fetch never truncates or
@@ -299,7 +299,7 @@ def cmd_get(args, config):
         return finish()
 
     except GdocsMdError:
-        # W2 fix: any of OUR errors (a missing token, a bad account, a
+        # Any of OUR errors (a missing token, a bad account, a
         # tab that doesn't exist) propagates as itself. Only an
         # unrecognized failure below falls through to the Drive-export
         # fallback path.
@@ -401,7 +401,7 @@ def cmd_create(args, config):
 
     title = args.title if args.title else file_path.stem
 
-    # Auth BEFORE the pandoc conversion (W19): if get_drive_service fails
+    # Auth BEFORE the pandoc conversion: if get_drive_service fails
     # (no token, expired refresh), there's no temp docx yet to leak. The
     # old order created the temp file first, outside any try/finally that
     # covered THIS call, so an auth failure here left it in /tmp forever.
@@ -426,12 +426,12 @@ def cmd_create(args, config):
         doc_id = file["id"]
         # The remote write already landed by this point -- everything
         # from here on is local bookkeeping. If it fails (unwritable
-        # registry dir, disk full, W4 lock contention), that must NOT
+        # registry dir, disk full, lock contention), that must NOT
         # look like "create failed": the doc exists, doc_id and url are
         # real, and swallowing them here is exactly what pushes a caller
         # to retry `create` on the same file, which the duplicate check
         # can't catch (nothing was registered) -- a second doc. Warn
-        # loudly and report what actually happened (W10).
+        # loudly and report what actually happened.
         registered = True
         registry_warning = None
         try:

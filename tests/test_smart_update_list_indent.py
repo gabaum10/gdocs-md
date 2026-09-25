@@ -1,4 +1,4 @@
-"""L2: a bulleted paragraph's own list indent must not be read/reset as
+"""A bulleted paragraph's own list indent must not be read/reset as
 this tool's separate blockquote-indent convention, in either direction.
 
 Horn (a): the Docs API reports indentStart/indentFirstLine on a bulleted
@@ -6,7 +6,8 @@ paragraph too (its own list indentation), not just on this tool's
 blockquote paragraphs. Before the fix, editing an existing list item's
 text emitted a spurious `indentStart: 0` reset on every edit, because the
 extraction read that indentStart as "this needs resetting to plain" --
-nestingLevel/listId (what the live F1 gate reads) don't show this at all.
+nestingLevel/listId (what the live bullet-identity-preservation gate
+reads) don't show this at all.
 
 Horn (b): converting a list item to a plain paragraph
 (deleteParagraphBullets) leaves the API's own visual indent behind --

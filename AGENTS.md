@@ -6,11 +6,12 @@ actually does.
 ## Install
 
 **Not on PyPI.** `uv tool install gdocs-md` does not work. Install from
-git, pinned to a tag (the repo is currently private -- see README.md's
-Install section for the access and upgrade details):
+git, pinned to a tag -- the repo is public, no credentials needed (see
+README.md's Install section for the full upgrade details, the
+`~/.local/bin`-on-PATH note, and the release-feed pointer):
 
 ```sh
-uv tool install git+https://github.com/gabaum10/gdocs-md@v0.1.0
+uv tool install git+https://github.com/gabaum10/gdocs-md@v0.1.1
 ```
 
 Requires `pandoc` >= 2.11.2 on PATH for `create` and `update --replace-all`
@@ -311,8 +312,9 @@ either way; don't parse stderr as part of a successful result.
   nested, and a new ordered item butted against an unordered list takes
   the unordered list's preset. This is a property of the insert-anchor
   model (an inserted list item's bullet inherits from whatever paragraph
-  it lands next to when that paragraph is already bulleted -- see F1 in
-  `smart_update.py`), not a bug fixed in this build.
+  it lands next to when that paragraph is already bulleted -- see
+  bullet-identity preservation in `smart_update.py`), not a bug fixed in
+  this build.
 - **`update`'s registry lookup only affects the smart-diff and
   `--replace-all` paths**, and only for updating the `updated` timestamp
   on an already-registered doc; a doc not in the registry (e.g. one

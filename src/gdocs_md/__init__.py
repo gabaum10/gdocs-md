@@ -5,7 +5,7 @@ See README.md for a human quickstart, AGENTS.md for the full agent
 contract (commands, exit codes, --json shapes, known limits).
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from .cli import main
 

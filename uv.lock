@@ -368,7 +368,7 @@ wheels = [
 
 [[package]]
 name = "gdocs-md"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "google-api-python-client" },

@@ -109,7 +109,7 @@ def _write_token_atomically(token_path: Path, token_data: dict):
     the moment it exists -- never a plain `open()` followed by a separate
     `chmod` afterward, which leaves a window where the file exists at the
     process umask's (looser) default permissions before the chmod call
-    lands (W14)."""
+    lands."""
     import tempfile
 
     token_path.parent.mkdir(parents=True, exist_ok=True)
@@ -133,7 +133,7 @@ def load_credentials(config: Config, account: str):
     Refresh is built with the scopes the token file itself records --
     never this module's narrower SCOPES list. See module docstring.
 
-    Loads `expiry` from the token file (W12): without it, `creds.expired`
+    Loads `expiry` from the token file: without it, `creds.expired`
     is always False (there's nothing to compare against) and the
     refresh-and-persist branch below is dead code -- refresh still happens,
     but reactively, inside the HTTP transport on a 401, and the refreshed

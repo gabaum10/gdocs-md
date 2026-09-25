@@ -3,6 +3,39 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.1.1] - 2026-09-25
+
+### Changed
+- README and AGENTS.md install instructions updated for the now-public
+  repo: dropped the "repo is currently private" note, and clarified that
+  a tag-pinned `uv tool install` moves to a new release by re-running the
+  install at the new tag, while `uv tool upgrade` only moves an install
+  that tracked a branch unpinned. Added a note that `uv tool` installs to
+  `~/.local/bin`, which may not be on `PATH` (`uv tool update-shell` or
+  add it manually), and pointers to the no-account release Atom feed
+  (`https://github.com/gabaum10/gdocs-md/releases.atom`) and GitHub
+  Watch -> Releases for release notifications.
+- README's "Flag ordering matters" section corrected: every global flag
+  works in either position (before or after the subcommand) -- the
+  stricter rule it previously documented was already fixed in code and
+  in AGENTS.md, just not in README.
+- Internal review-round finding labels (`F1`-`F3`, `L1`-`L7`, `W1`-`W19`,
+  etc.) in code comments, docstrings, and two test filenames
+  (`test_smart_update_l1.py` -> `test_smart_update_stacked_inserts.py`,
+  `test_smart_update_l2.py` -> `test_smart_update_list_indent.py`)
+  replaced with plain descriptions of what they refer to -- those labels
+  meant nothing to a reader outside the review that minted them.
+- `release.yml` now uploads only `dist/*.whl` and `dist/*.tar.gz` to the
+  GitHub Release, instead of `dist/*`, which also picked up the
+  `dist/.gitignore` file `uv build` writes.
+
+### Heads up
+- `google-api-core` (a transitive dependency via
+  `google-api-python-client`) has announced that its Python 3.10 support
+  ends 2026-10-04. This release keeps `requires-python >= 3.10` -- 3.10
+  is not being dropped in a patch release -- but a future release will
+  need to raise the floor once that support window closes upstream.
+
 ## [0.1.0] - 2026-09-25
 
 Initial release. Standalone package extracted from an internal single-file
